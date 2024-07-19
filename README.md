@@ -17,3 +17,4 @@ With these project files. The application should build without any issue.
 * https://github.com/native-toolkit/libtinyfiledialogs/tree/2.9.3
 * https://github.com/glfw/glfw/tree/3.4
 * https://github.com/ocornut/imgui/tree/v1.90.9-docking
+* https://github.com/anthofoxo/lua/tree/5.4.6

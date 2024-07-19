@@ -7,3 +7,6 @@
 [submodule "vendor/tinyfd"]
 	path = vendor/tinyfd
 	url = https://github.com/native-toolkit/libtinyfiledialogs
+[submodule "vendor/lua"]
+	path = vendor/lua
+	url = https://github.com/anthofoxo/lua

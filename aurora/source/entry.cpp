@@ -1,3 +1,7 @@
+#ifdef _WIN32
+#	include <Windows.h> // Suppress: warning C4005: 'APIENTRY': macro redefinition
+#endif
+
 #include <GLFW/glfw3.h>
 
 #include <tinyfiledialogs.h>
@@ -6,7 +10,9 @@
 #include <imgui_impl_opengl3.h>
 #include <imgui_impl_opengl3_loader.h>
 #include <imgui.h>
+#include <lua.hpp>
 
+#include <array>
 #include <filesystem>
 #include <string>
 #include <vector>
@@ -14,6 +20,17 @@
 #include <fstream>
 #include <unordered_map>
 #include <cstdint>
+
+#if defined(WIN32) || defined(_WIN32) || defined(__WIN32__) || defined(__NT__)
+#define SystemOpenURL(url) system("start " url);
+#elif __APPLE__
+#define SystemOpenURL(url) system("open " url);
+#elif __linux__
+#define SystemOpenURL(url) system("xdg-open" url);
+#else
+#error "Unknown compiler"
+#endif
+
 
 uint32_t hash32(unsigned char const* array, unsigned int size) {
 	uint32_t h = 0x811c9dc5;
@@ -70,7 +87,8 @@ std::string readString(char** ptr) {
 }
 
 enum struct FileType : uint32_t {
-	kObjlib = 0x00000008
+	kObjlib     = 0x00000008,
+	kDdsTexture = 0x0000000e
 };
 
 enum struct ObjType : uint32_t {
@@ -119,7 +137,7 @@ enum struct ObjType : uint32_t {
 };
 
 struct ObjlibHeader {
-	uint32_t fileType;
+	FileType fileType;
 	ObjType objType;
 	uint32_t unknown0;
 	uint32_t unknown1;
@@ -151,6 +169,29 @@ struct Objlib {
 	std::vector<Object> objects;
 };
 
+std::array<std::string_view, 20> kTraitTypes = {
+	"kTraitInt",
+	"kTraitBool",
+	"kTraitFloat",
+	"kTraitColor",
+	"kTraitObj",
+	"kTraitVec3",
+	"kTraitPath",
+	"kTraitEnum",
+	"kTraitAction",
+	"kTraitObjVec",
+	"kTraitString",
+	"kTraitCue",
+	"kTraitEvent",
+	"kTraitSym",
+	"kTraitList",
+	"kTraitTraitPath",
+	"kTraitQuat",
+	"kTraitChildLib",
+	"kTraitComponent",
+	"kNumTraitTypes"
+};
+
 int failedCount = 0;
 
 std::optional<Objlib> readObjlib(char const* file) {
@@ -162,26 +203,34 @@ std::optional<Objlib> readObjlib(char const* file) {
 	memcpy(&lib.header, ptr, sizeof(ObjlibHeader));
 	ptr += sizeof(ObjlibHeader);
 
-	if (lib.header.fileType != 8)
+	if (lib.header.fileType != FileType::kObjlib)
 		return std::nullopt;
-	
-	if (lib.header.objType == ObjType::kObjlibSequin) {
-		++failedCount;
-		return std::nullopt;
-	}
 
 	if (lib.header.objType == ObjType::kObjlibObj) {
 		++failedCount;
 		return std::nullopt;
 	}
 
-	if (lib.header.objType == ObjType::kObjlibAvatar) {
-		++failedCount;
-		return std::nullopt;
+	if (lib.header.objType == ObjType::kObjlibGfx) {
+		// nothing here?
 	}
 
 	// Not very sure what this value is
 	if (lib.header.objType == ObjType::kObjlibLevel) {
+		uint32_t unknown;
+		memcpy(&unknown, ptr, sizeof(uint32_t));
+		ptr += sizeof(uint32_t);
+	}
+
+	// Not very sure what this value is
+	if (lib.header.objType == ObjType::kObjlibAvatar) {
+		uint32_t unknown;
+		memcpy(&unknown, ptr, sizeof(uint32_t));
+		ptr += sizeof(uint32_t);
+	}
+
+	// Not very sure what this value is
+	if (lib.header.objType == ObjType::kObjlibSequin) {
 		uint32_t unknown;
 		memcpy(&unknown, ptr, sizeof(uint32_t));
 		ptr += sizeof(uint32_t);
@@ -240,10 +289,44 @@ void loadObjLibs() {
 	}
 }
 
+void dumpHashes() {
+	std::ofstream file;
+	file.open("hash_dump.lua");
+	file << "local table = {}\n";
+
+	for (auto const& [k, v] : kMap) {
+		file << "table[0x" << k << "] = \"A";
+		file << v.originalName;
+		file << "\"\n";
+	}
+
+	file << "return table";
+	file.close();
+}
+
+void loadConfig() {
+	if (std::filesystem::exists("config.lua")) {
+		lua_State* L = luaL_newstate();
+		luaL_dofile(L, "config.lua");
+		lua_getglobal(L, "cachePath");
+		kCacheDir = lua_tostring(L, -1);
+		lua_close(L);
+	}
+	else {
+		char const* selection = tinyfd_openFileDialog("Select Thumper executable", nullptr, 0, nullptr, nullptr, 0);
+		if (selection == nullptr) return std::exit(0);
+		kCacheDir = (std::filesystem::path(selection).parent_path() / "cache").string();
+		std::replace(kCacheDir.begin(), kCacheDir.end(), '\\', '/');
+
+		std::ofstream file;
+		file.open("config.lua");
+		file << "cachePath = \"" << kCacheDir << "\"";
+		file.close();
+	}
+}
+
 int main(int, char* []) {
-	char const* selection = tinyfd_openFileDialog("Select Thumper executable", nullptr, 0, nullptr, nullptr, 0);
-	if (selection == nullptr) return 0;
-	kCacheDir = (std::filesystem::path(selection).parent_path() / "cache").string();
+	loadConfig();
 
 	loadObjLibs();
 
@@ -278,6 +361,7 @@ int main(int, char* []) {
 	ImGui_ImplOpenGL3_Init("#version 330 core");
 
 	bool viewHasher = false;
+	bool viewBpms = false;
 
 	while (!glfwWindowShouldClose(window)) {
 		glfwPollEvents();
@@ -295,8 +379,16 @@ int main(int, char* []) {
 				ImGui::EndMenu();
 			}
 
-			if (ImGui::BeginMenu("View")) {
+			if (ImGui::BeginMenu("Tools")) {
 				ImGui::MenuItem("Hasher", nullptr, &viewHasher);
+				ImGui::MenuItem("Level BPMs", nullptr, &viewBpms);
+				if (ImGui::MenuItem("Dump hashes", nullptr, nullptr))
+					dumpHashes();
+
+				if (ImGui::MenuItem("Thumper File and Object Format Specification", nullptr, nullptr)) {
+					SystemOpenURL("https://thumper.tiddlyhost.com/");
+				}
+				
 				ImGui::EndMenu();
 			}
 
@@ -308,9 +400,25 @@ int main(int, char* []) {
 				static std::string input;
 				static uint32_t hash = hash32(nullptr, 0);
 				if (ImGui::InputText("Input", &input))
-					hash = hash32((unsigned char const*)input.data(), input.size());
+					hash = hash32((unsigned char const*)input.data(), static_cast<unsigned int>(input.size()));
 
 				ImGui::Text("0x%02X", hash);
+			}
+			ImGui::End();
+		}
+
+		if (viewBpms) {
+			if (ImGui::Begin("Level Bpms", &viewBpms)) {
+				ImGui::LabelText("Level 1", "%s", "320");
+				ImGui::LabelText("Level 2", "%s", "340");
+				ImGui::LabelText("Level 3", "%s", "360");
+				ImGui::LabelText("Level 4", "%s", "380");
+				ImGui::LabelText("Level 5", "%s", "400");
+				ImGui::LabelText("Level 6", "%s", "420");
+				ImGui::LabelText("Level 7", "%s", "440");
+				ImGui::LabelText("Level 8", "%s", "460");
+				ImGui::LabelText("Level 9", "%s", "480");
+				ImGui::LabelText("Level 10", "%s", "270-550~");
 			}
 			ImGui::End();
 		}
