@@ -12,6 +12,8 @@
 #include <imgui.h>
 #include <lua.hpp>
 
+#include "hashtable.hpp"
+
 #include <any>
 #include <algorithm>
 #include <array>
@@ -581,150 +583,9 @@ int main(int, char* []) {
 		}
 
 		if (leafOffset) {
+			auto displayHash = [](char const* label, uint32_t hash) {
 
-			auto resolveHash = [](uint32_t hash) -> char const* {
-				switch (std::byteswap(hash)) {
-					case 0x44314fe0: return "layer_volume";
-					case 0x5c6cdb90: return "pitch";
-					case 0x6aa21d46: return "roll";
-					case 0xb80b9c65: return "turn";
-					case 0x5d0b471e: return "turn_auto";
-					case 0xf19f4bb4: return "scale_x";
-					case 0xb9c2015c: return "scale_y";
-					case 0xcebc9427: return "scale_z";
-					case 0x51b1082e: return "offset_x";
-					case 0x4fb34afa: return "offset_y";
-					case 0xbc04f81f: return "offset_z";
-					case 0x44716948: return "visibla01";
-					case 0xfa582a84: return "visibla02";
-					case 0xf9ac44a4: return "visible";
-					case 0x04fedc93: return "visiblz01";
-					case 0x7d03e47c: return "visiblz02";
-					case 0x5fdec67e: return "sequin_speed";
-					case 0xb325e145: return "win";
-					case 0x43321ff3: return "win_checkpoint";
-					case 0xa43978d3: return "win_checkpoint_silent";
-					case 0x749cbb82: return "play";
-					case 0x6dc52e7a: return "play_clean";
-					case 0xfa2216a2: return "pause";
-					case 0x4beab80b: return "resume";
-					case 0x7185a69f: return "stop";
-					case 0x3baabd13: return "emissive_color";
-					case 0x1cb1067d: return "ambient_color";
-					case 0x748afe3d: return "diffuse_color";
-					case 0xce02b6d7: return "specular_color";
-					case 0x7283a01c: return "reflectivity_color";
-					case 0xf46ba052: return "alpha";
-					case 0xf1d9b5b3: return "frame";
-					case 0x7a44d752: return "thump_rails.a01";
-					case 0xc2c83c58: return "thump_rails.a02";
-					case 0xd4bb7744: return "thump_rails.ent";
-					case 0x8d8812dc: return "thump_rails.z01";
-					case 0x4127f2bb: return "thump_rails.z02";
-					case 0x6b517c89: return "thump_checkpoint.ent";
-					case 0x2c9ffaad: return "thump_rails_fast_activat.ent";
-					case 0xe6a53347: return "thump_boss_bonus.ent";
-					case 0x4332b951: return "grindable_still.ent";
-					case 0x01c553cf: return "left_multi.a01";
-					case 0xfa71cbbe: return "left_multi.a02";
-					case 0x76255b6e: return "left_multi.ent";
-					case 0x8a8628d5: return "left_multi.z01";
-					case 0xfc07e1b9: return "center_multi.a02";
-					case 0x917e5aed: return "center_multi.ent";
-					case 0x3c6c7be2: return "center_multi.z01";
-					case 0x3e65f499: return "right_multi.a02";
-					case 0x61e90a1e: return "right_multi.ent";
-					case 0x3849fd03: return "right_multi.z01";
-					case 0x45f2b073: return "right_multi.z02";
-					case 0xf94a773e: return "grindable_quarters.ent";
-					case 0xae2baf73: return "grindable_double.ent";
-					case 0xdff61622: return "grindable_thirds.ent";
-					case 0xa438378b: return "grindable_with_thump.ent";
-					case 0x13e333c9: return "ducker_crak.ent";
-					case 0x8a414307: return "jumper_1_step.ent";
-					case 0x5108b32e: return "jumper_boss.ent";
-					case 0xe4ab558d: return "jumper_6_step.ent";
-					case 0x04b286b8: return "jump_high.ent";
-					case 0x934f009b: return "jump_high_2.ent";
-					case 0xc4dffdcd: return "jump_high_4.ent";
-					case 0x0b3bbe10: return "jump_high_6.ent";
-					case 0xb04ff00e: return "jump_boss.ent";
-					case 0x229d1c60: return "swerve_off.a01";
-					case 0x7c7681d8: return "swerve_off.a02";
-					case 0x2624603f: return "swerve_off.ent";
-					case 0xc09921c9: return "swerve_off.z01";
-					case 0xb104000d: return "swerve_off.z02";
-					case 0xdde5ea43: return "millipede_half.a01";
-					case 0xbfc142ce: return "millipede_half.a02";
-					case 0x278101be: return "millipede_half.ent";
-					case 0x26411db0: return "millipede_half.z01";
-					case 0xc929b845: return "millipede_half.z02";
-					case 0x2a2b2abf: return "millipede_half_phrase.a01";
-					case 0xea6bcfca: return "millipede_half_phrase.a02";
-					case 0x324eafbb: return "millipede_half_phrase.ent";
-					case 0xf05534f5: return "millipede_half_phrase.z01";
-					case 0x16028ef2: return "millipede_half_phrase.z02";
-					case 0xe4996736: return "millipede_quarter.a01";
-					case 0xd45fb240: return "millipede_quarter.a02";
-					case 0x12ae0317: return "millipede_quarter.ent";
-					case 0x9615ac66: return "millipede_quarter.z01";
-					case 0x2fba0ddb: return "millipede_quarter.z02";
-					case 0xb3391504: return "millipede_quarter_phrase.a01";
-					case 0x3a611c4c: return "millipede_quarter_phrase.a02";
-					case 0xf4e52c1d: return "millipede_quarter_phrase.ent";
-					case 0x97abc10b: return "millipede_quarter_phrase.z01";
-					case 0x4ee5481e: return "millipede_quarter_phrase.z02";
-					case 0x7472e6f1: return "sentry.ent";
-					case 0x5adb9287: return "level_9.ent";
-					case 0x9b17eb32: return "level_5.ent";
-					case 0x28fd6d47: return "level_8.ent";
-					case 0x1ea5e932: return "sentry_boss.ent";
-					case 0x6e68ebbf: return "level_7.ent";
-					case 0xb9b058ac: return "level_6.ent";
-					case 0xfd3a0fc7: return "sentry_boss_multilane.ent";
-					case 0x584d03b4: return "level_8_multi.ent";
-					case 0xe8607cb8: return "level_9_multi.ent";
-					case 0x6205d6a8: return "trees.ent";
-					case 0x1d5163bb: return "trees_16.ent";
-					case 0x2f92afc5: return "trees_4.ent";
-					case 0x74d17b1e: return "speed_streaks_short.ent";
-					case 0xa8cbcd87: return "speed_streaks_RGB.ent";
-					case 0xdd966fc6: return "smoke.ent";
-					case 0x363684d7: return "death_shatter.ent";
-					case 0x990aa855: return "speed_streaks.ent";
-					case 0xb74b4176: return "data_streaks_radial.ent";
-					case 0x23391149: return "boss_7_tunnel_enter.ent";
-					case 0xed9b61db: return "boss_damage_stage4.ent";
-					case 0xdb1188a2: return "crakhed_damage.ent";
-					case 0x2b51026f: return "win_debris.ent";
-					case 0xc836bda8: return "crakhed_destroy.ent";
-					case 0x5d04dc71: return "stalactites.ent";
-					case 0xd044c96a: return "aurora.ent";
-					case 0xd97ba001: return "vortex_decorator.ent";
-					case 0x46f78f71: return "boss_damage_stage3.ent";
-					case 0x1a8d25d8: return "boss_damage_stage1.ent";
-					case 0xd0870ab0: return "boss_damage_stage2.ent";
-					case 0xda02e4d8: return "black";
-					case 0xa3f11114: return "crakhed";
-					case 0x4010b94b: return "dark_blue";
-					case 0x3b8150fa: return "dark_green";
-					case 0x78616530: return "dark_red";
-					case 0x5a32c8c0: return "light_blue";
-					case 0x192d653b: return "light_green";
-					case 0xf053aaa7: return "light_red";
-					case 0xf35b74e5: return "fire";
-					case 0x5f5773e0: return "diss11";
-					case 0xd33d6079: return "french12";
-					case 0x39d60d8c: return "tutorial_thumps.ent";
-					case 0xe256c0c7: return "boss_gate_pellet.ent";
-					default: return nullptr;
-				}
-					
-			};
-
-			auto displayHash = [&resolveHash](char const* label, uint32_t hash) {
-
-				char const* match = resolveHash(hash);
+				char const* match = aurora::lookupHash(hash);
 
 				if(match) ImGui::LabelText(label, "%s", match);
 				else ImGui::LabelText(label, "%08X", hash);
@@ -732,16 +593,17 @@ int main(int, char* []) {
 			};
 
 			if (ImGui::Begin("Leaf Dump")) {
-				ImGui::LabelText("Offset", "%p", (void*)(uintptr_t)(leafOffset - objlibOrigin));
-
 				char* iterator = leafOffset;
 				iterator += 16; // Skip header
 
-				ImGui::LabelText("Hash", "%08X", readUint32(&iterator));
+				ImGui::LabelText("Offset", "%p", (void*)(uintptr_t)(leafOffset - objlibOrigin));
+				ImGui::Separator();
+
+				displayHash("Hash", readUint32(&iterator));
 				ImGui::LabelText("Unknown", "%08X", readUint32(&iterator));
-				ImGui::LabelText("Hash", "%08X", readUint32(&iterator));
+				ImGui::LabelText("Unknown", "%f", std::bit_cast<float>(readUint32(&iterator)));
 				ImGui::LabelText("Timeunit", "%s", readString(&iterator).c_str());
-				ImGui::LabelText("Hash", "%08X", readUint32(&iterator));
+				displayHash("Hash", readUint32(&iterator));
 				uint32_t numTraits = readUint32(&iterator);
 
 
@@ -751,13 +613,14 @@ int main(int, char* []) {
 
 				for (int i = 0; i < numTraits; ++i) {
 
-					std::string traitName = readString(&iterator);
+					ImGui::PushID(i);
 
+					std::string traitName = readString(&iterator);
 
 					ImGui::LabelText("Trait name", "%s", traitName.c_str());
 					ImGui::LabelText("Unknown", "%08X", readUint32(&iterator));
 
-					displayHash("Paramter", readUint32(&iterator));
+					displayHash("Parameter", readUint32(&iterator));
 
 					ImGui::LabelText("Subobject Identifier", "%08X", readUint32(&iterator));
 					TraitType traitType = (TraitType)readUint32(&iterator);
@@ -766,50 +629,40 @@ int main(int, char* []) {
 					ImGui::LabelText("Num datapoints", "%d", numDatapoints);
 
 					for (uint32_t j = 0; j < numDatapoints; ++j) {
-						ImGui::Separator();
 						uint32_t datapoint = readUint32(&iterator);
 
 						std::any value;
-
-						if (traitType == TraitType::kTraitFloat) {
-							value = std::bit_cast<float>(readUint32(&iterator));
-						}
-						else if (traitType == TraitType::kTraitAction) {
-							value = std::bit_cast<char>(readByte(&iterator));
-						}
-						else if (traitType == TraitType::kTraitBool) {
-							value = std::bit_cast<char>(readByte(&iterator));
-						}
+						if (traitType == TraitType::kTraitFloat) value = std::bit_cast<float>(readUint32(&iterator));
+						else if (traitType == TraitType::kTraitAction) value = std::bit_cast<char>(readByte(&iterator));
+						else if (traitType == TraitType::kTraitBool) value = std::bit_cast<char>(readByte(&iterator));
 						else __debugbreak();
 
 						std::string interpolation = readString(&iterator);
 						std::string easingMode = readString(&iterator);
 
-						ImGui::LabelText("Datapoint", "%f", std::bit_cast<float>(datapoint));
+						std::string str = std::format("[{}]", j);
+						
+						if (ImGui::TreeNode(str.c_str())) {
+							ImGui::LabelText("Time", "%f", std::bit_cast<float>(datapoint));
 
-						if (traitType == TraitType::kTraitFloat) {
-							ImGui::LabelText("Value", "%f", std::any_cast<float>(value));
+							if (traitType == TraitType::kTraitFloat) ImGui::LabelText("Value", "%f", std::any_cast<float>(value));
+							else if (traitType == TraitType::kTraitAction) ImGui::LabelText("Value", "%d", std::any_cast<char>(value));
+							else if (traitType == TraitType::kTraitBool) ImGui::LabelText("Value", "%d", std::any_cast<char>(value));
+							else __debugbreak();
+
+							ImGui::LabelText("Interpolation", "%s", interpolation.c_str());
+							ImGui::LabelText("Easing", "%s", easingMode.c_str());
+
+							ImGui::TreePop();
 						}
-						else if (traitType == TraitType::kTraitAction) {
-							ImGui::LabelText("Value", "%d", std::any_cast<char>(value));
-						}
-						else if (traitType == TraitType::kTraitBool) {
-							ImGui::LabelText("Value", "%d", std::any_cast<char>(value));
-						}
-						else __debugbreak();
-
-						ImGui::LabelText("Interpolation", "%s", interpolation.c_str());
-						ImGui::LabelText("Easing", "%s", easingMode.c_str());
-
-
-
+						
 					}
 
 					ImGui::Separator();
 					ImGui::TextUnformatted("Total number of displayed UI elements for data points on Drool's Editor.");
 					uint32_t additional_unknown = readUint32(&iterator);
 					for (int j = 0; j < additional_unknown; ++j) {
-						ImGui::LabelText("Datapoint", "%f", std::bit_cast<float>(readUint32(&iterator)));
+						ImGui::LabelText("Time", "%f", std::bit_cast<float>(readUint32(&iterator)));
 
 						char const* label = (j == additional_unknown - 1) ? "Value (unused)" : "Value";
 						ImGui::LabelText(label, "%f", std::bit_cast<float>(readUint32(&iterator)));
@@ -841,6 +694,7 @@ int main(int, char* []) {
 					ImGui::LabelText("Unknown", "%d", readByte(&iterator));
 					ImGui::LabelText("Unknown", "%d", readByte(&iterator));
 
+					ImGui::PopID();
 				}
 			}
 			ImGui::End();
