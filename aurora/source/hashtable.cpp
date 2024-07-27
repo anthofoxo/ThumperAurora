@@ -5,6 +5,7 @@ char const* aurora::lookupHash(uint32_t hash) {
 	// --- undocumented ---
 	case 0x63259f0a: return "AnimComp";
 	case 0x3c8efb12: return "EditStateComp";
+	case 0x84e761eb: return "XfmComp";
 
 	// --- object parameters ---
 

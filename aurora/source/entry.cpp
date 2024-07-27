@@ -183,6 +183,9 @@ struct Object {
 };
 
 struct Objlib {
+	std::string originFile;
+
+
 	std::vector<char> raw;
 	size_t headerDefOffset; // Offset into raw data the object definitions start
 
@@ -225,6 +228,8 @@ int failedCount = 0;
 
 std::optional<Objlib> readObjlib(char const* file) {
 	Objlib lib;
+
+	lib.originFile = file;
 
 	lib.raw = readFile(file).value();
 	char* const baseaddr = lib.raw.data();
@@ -429,6 +434,265 @@ static void dumpstack(lua_State* L) {
 
 static Objlib* selection = nullptr;
 
+auto displayHash = [](char const* label, uint32_t hash) {
+
+	char const* match = aurora::lookupHash(hash);
+
+	if (match) ImGui::LabelText(label, "%s", match);
+	else ImGui::LabelText(label, "%08X", hash);
+
+	};
+
+static void writeU8(std::vector<uint8_t>& buffer, uint8_t data) {
+	buffer.push_back(data);
+}
+
+static void writeU32(std::vector<uint8_t>& buffer, uint32_t data) {
+	for (int i = 0; i < sizeof(uint32_t); ++i)
+		buffer.push_back(0);
+
+	memcpy(buffer.data() + buffer.size() - sizeof(uint32_t), &data, sizeof(uint32_t));
+}
+
+static void writeStr(std::vector<uint8_t>& buffer, std::string_view data) {
+	writeU32(buffer, static_cast<uint32_t>(data.size()));
+	for (auto c : data)
+		buffer.push_back(c);
+}
+
+static void writeF32(std::vector<uint8_t>& buffer, float data) {
+	for (int i = 0; i < sizeof(float); ++i)
+		buffer.push_back(0);
+
+	memcpy(buffer.data() + buffer.size() - sizeof(float), &data, sizeof(float));
+}
+
+static void writeVec3(std::vector<uint8_t>& buffer, vec3 const& data) {
+	writeF32(buffer, data.x);
+	writeF32(buffer, data.y);
+	writeF32(buffer, data.z);
+}
+
+
+
+
+void InjectIntoPc(std::vector<uint8_t>& raw, std::string originFile, size_t originSize, size_t originOffset) {
+
+	std::string backup = originFile + std::string(".bak");
+	if (!std::filesystem::exists(backup))
+		std::filesystem::copy(originFile, backup);
+
+	std::vector<char> original = readFile(originFile.c_str()).value();
+	std::vector<char> final;
+	final.resize(original.size() - originSize + raw.size());
+
+	memcpy(final.data(), original.data(), originOffset);
+	memcpy(final.data() + originOffset, raw.data(), raw.size());
+	memcpy(final.data() + originOffset + raw.size(), original.data() + originOffset + originSize + 1, original.size() - originOffset - originSize);
+
+	std::ofstream stream(originFile, std::ofstream::binary);
+	stream.write(final.data(), final.size());
+	stream.close();
+
+	tinyfd_messageBox("Injected", "Changed injected, Application will exit", "ok", "info", 1);
+	std::exit(0);
+}
+
+struct Samp final {
+	std::string originFile;
+	size_t originSize = 0;
+	size_t originOffset = 0;
+
+	uint32_t header[3];
+	uint32_t hash;
+	std::string playMode;
+	uint32_t unknown0;
+	std::string filepath;
+	uint8_t unknown1[5];
+	float volume;
+	float pitch;
+	float pan;
+	float offset; // Likely in seconds
+	std::string channel;
+
+	void draw() {
+		ImGui::TextUnformatted("Origin");
+		ImGui::Separator();
+		ImGui::LabelText("File", "%s", originFile.c_str());
+		ImGui::LabelText("Offset", "%d", originOffset);
+		ImGui::LabelText("Size", "%d", originSize);
+
+		ImGui::TextUnformatted("Data");
+		ImGui::Separator();
+
+		displayHash("Hash", hash);
+		ImGui::InputText("Play mode", &playMode);
+		ImGui::InputScalarN("Unknown 0", ImGuiDataType_U32, &unknown0, 1, nullptr, nullptr, "%d", 0);
+		ImGui::InputText("Filepath", &filepath);
+		ImGui::InputScalarN("Unknown 1", ImGuiDataType_U8, &unknown1, 5, nullptr, nullptr, "%d", 0);
+		ImGui::DragFloat("Volume", &volume);
+		ImGui::DragFloat("Pitch", &pitch);
+		ImGui::DragFloat("Pan", &pan);
+		ImGui::DragFloat("Offset", &offset);
+		ImGui::InputText("Channel", &channel);
+
+		ImGui::Separator();
+		ImGui::PushStyleColor(ImGuiCol_Button, { 1,0,0,1 });
+		ImGui::PushStyleColor(ImGuiCol_ButtonHovered, { 1, .3f, .3f,1 });
+		if (ImGui::Button("Inject")) {
+			std::vector<uint8_t> raw;
+			serialize(raw);
+			InjectIntoPc(raw, originFile, originSize, originOffset);
+		}
+		ImGui::PopStyleColor(2);
+	}
+
+	void origin(std::string const& file, size_t offset, size_t size) {
+		originFile = file;
+		originOffset = offset;
+		originSize = size;
+	}
+
+	char* deserialize(char* ptr) {
+		memcpy(header, ptr, sizeof(header)); ptr += sizeof(header);
+		hash = readUint32(&ptr);
+		playMode = readString(&ptr);
+		unknown0 = readUint32(&ptr);
+		filepath = readString(&ptr);
+		memcpy(unknown1, ptr, sizeof(unknown1)); ptr += sizeof(unknown1);
+		volume = std::bit_cast<float>(readUint32(&ptr));
+		pitch = std::bit_cast<float>(readUint32(&ptr));
+		pan = std::bit_cast<float>(readUint32(&ptr));
+		offset = std::bit_cast<float>(readUint32(&ptr));
+		channel = readString(&ptr);
+		return ptr;
+	}
+
+	void serialize(std::vector<uint8_t>& data) {
+		writeU32(data, header[0]);
+		writeU32(data, header[1]);
+		writeU32(data, header[2]);
+		writeU32(data, hash);
+		writeStr(data, playMode);
+		writeU32(data, unknown0);
+		writeStr(data, filepath);
+		writeU8(data, unknown1[0]);
+		writeU8(data, unknown1[1]);
+		writeU8(data, unknown1[2]);
+		writeU8(data, unknown1[3]);
+		writeU8(data, unknown1[4]);
+		writeF32(data, volume);
+		writeF32(data, pitch);
+		writeF32(data, pan);
+		writeF32(data, offset);
+		writeStr(data, channel);
+	}
+
+};
+
+struct Spn final {
+	std::string originFile;
+	size_t originSize = 0;
+	size_t originOffset = 0;
+
+	uint32_t header[3];
+	uint32_t hash0;
+	uint32_t hash1;
+	uint32_t unknown0;
+	std::string name;
+	std::string constraint;
+	vec3 translation;
+	vec3 rotationx;
+	vec3 rotationy;
+	vec3 rotationz;
+	vec3 scale;
+	uint32_t unknown1;
+	std::string objlibpath;
+	std::string bucketType;
+
+	void origin(std::string const& file, size_t offset, size_t size) {
+		originFile = file;
+		originOffset = offset;
+		originSize = size;
+	}
+
+	void draw() {
+		ImGui::TextUnformatted("Origin");
+		ImGui::Separator();
+		ImGui::LabelText("File", "%s", originFile.c_str());
+		ImGui::LabelText("Offset", "%d", originOffset);
+		ImGui::LabelText("Size", "%d", originSize);
+
+		ImGui::TextUnformatted("Data");
+		ImGui::Separator();
+
+		displayHash("Hash", hash0);
+		displayHash("Hash", hash1);
+		ImGui::InputScalarN("Unknown 0", ImGuiDataType_U32, &unknown0, 1, nullptr, nullptr, "%d", 0);
+		ImGui::InputText("Name", &name);
+		ImGui::InputText("Constraint", &constraint);
+		ImGui::DragFloat3("Position", (float*)&translation);
+		ImGui::DragFloat3("Rotation x", (float*)&rotationx);
+		ImGui::DragFloat3("Rotation y", (float*)&rotationy);
+		ImGui::DragFloat3("Rotation z", (float*)&rotationz);
+		ImGui::DragFloat3("Scale", (float*)&scale);
+		ImGui::InputScalarN("Unknown 1", ImGuiDataType_U32, &unknown1, 1, nullptr, nullptr, "%d", 0);
+		ImGui::InputText("Objlibpath", &objlibpath);
+		ImGui::InputText("Bucket type", &bucketType);
+
+		ImGui::Separator();
+		ImGui::PushStyleColor(ImGuiCol_Button, { 1,0,0,1 });
+		ImGui::PushStyleColor(ImGuiCol_ButtonHovered, { 1, .3f, .3f,1 });
+		if (ImGui::Button("Inject")) {
+			std::vector<uint8_t> raw;
+			serialize(raw);
+			InjectIntoPc(raw, originFile, originSize, originOffset);
+
+		}
+		ImGui::PopStyleColor(2);
+	}
+
+	char* deserialize(char* ptr) {
+		memcpy(header, ptr, sizeof(header)); ptr += sizeof(header);
+		hash0 = readUint32(&ptr);
+		hash1 = readUint32(&ptr);
+		unknown0 = readUint32(&ptr);
+		name = readString(&ptr);
+		constraint = readString(&ptr);
+		translation = readVec3(&ptr);
+		rotationx = readVec3(&ptr);
+		rotationy = readVec3(&ptr);
+		rotationz = readVec3(&ptr);
+		scale = readVec3(&ptr);
+		unknown1 = readUint32(&ptr);
+		objlibpath = readString(&ptr);
+		bucketType = readString(&ptr);
+		return ptr;
+	}
+
+	void serialize(std::vector<uint8_t> &data) {
+		writeU32(data, header[0]);
+		writeU32(data, header[1]);
+		writeU32(data, header[2]);
+		writeU32(data, hash0);
+		writeU32(data, hash1);
+		writeU32(data, unknown0);
+		writeStr(data, name);
+		writeStr(data, constraint);
+		writeVec3(data, translation);
+		writeVec3(data, rotationx);
+		writeVec3(data, rotationy);
+		writeVec3(data, rotationz);
+		writeVec3(data, scale);
+		writeU32(data, unknown1);
+		writeStr(data, objlibpath);
+		writeStr(data, bucketType);
+	}
+};
+
+static std::optional<Spn> spnParsed = std::nullopt;
+static std::optional<Samp> sampParsed = std::nullopt;
+
 int main(int, char* []) {
 
 
@@ -614,7 +878,6 @@ int main(int, char* []) {
 						byteTokens.push_back(static_cast<uint8_t>(byte));
 					}
 
-
 					auto occurance = std::search(selection->raw.data() + offsetbegin, selection->raw.data() + selection->raw.size(), byteTokens.data(), byteTokens.data() + byteTokens.size());
 
 					if (occurance == selection->raw.data() + selection->raw.size()) {
@@ -626,35 +889,34 @@ int main(int, char* []) {
 						memedit.GotoAddrAndHighlight(occurance - selection->raw.data(), occurance - selection->raw.data() + 16);
 						objlibOrigin = selection->raw.data();
 						parseOffset = occurance;
+
+						if (parseModeIdx == 4) {
+							sampParsed = Samp();
+							char* a = parseOffset;
+							char* b = sampParsed->deserialize(parseOffset);
+							sampParsed->origin(selection->originFile, a - selection->raw.data(), b - a - 1);
+						}
+						else if (parseModeIdx == 3) {
+							spnParsed = Spn();
+							char* a = parseOffset;
+							char* b = spnParsed->deserialize(parseOffset);
+							spnParsed->origin(selection->originFile, a - selection->raw.data(), b - a - 1);
+						}
 					}
-					
-
-
 				}
-				
-
-				
 			}
 			ImGui::End();
 
 			if (ImGui::Begin("Memory Viewer") && selection) {
-				
 				memedit.DrawContents(selection->raw.data(), selection->raw.size(), (size_t)0);
 			}
-
 			ImGui::End();
+
 		}
 
 		if (parseOffset && parseModeIdx != 0) {
 
-			auto displayHash = [](char const* label, uint32_t hash) {
-
-				char const* match = aurora::lookupHash(hash);
-
-				if (match) ImGui::LabelText(label, "%s", match);
-				else ImGui::LabelText(label, "%08X", hash);
-
-				};
+			
 
 			if (parseModeIdx == 1) {
 				if (ImGui::Begin("Parser")) {
@@ -800,73 +1062,13 @@ int main(int, char* []) {
 
 				}
 				ImGui::End();
-
 			}
 
-			if (parseModeIdx == 3) {
-				if (ImGui::Begin("Spn dump")) {
-					char* iterator = parseOffset;
-					iterator += 12; // Skip header
-
-					ImGui::LabelText("Offset", "%p", (void*)(uintptr_t)(parseOffset - objlibOrigin));
-					ImGui::Separator();
-
-					displayHash("Hash", readUint32(&iterator));
-					displayHash("Hash", readUint32(&iterator));
-					displayHash("Unknown", readUint32(&iterator));
-					ImGui::LabelText("Name", "%s", readString(&iterator).c_str());
-					ImGui::LabelText("Constraint", "%s", readString(&iterator).c_str());
-
-					vec3 pos = readVec3(&iterator);
-					vec3 rotx = readVec3(&iterator);
-					vec3 roty = readVec3(&iterator);
-					vec3 rotz = readVec3(&iterator);
-					vec3 scale = readVec3(&iterator);
-
-					ImGui::BeginDisabled();
-					ImGui::DragFloat3("Position", (float*)&pos);
-					ImGui::DragFloat3("Rotation x", (float*)&rotx);
-					ImGui::DragFloat3("Rotation y", (float*)&roty);
-					ImGui::DragFloat3("Rotation z", (float*)&rotz);
-					ImGui::DragFloat3("Scale", (float*)&scale);
-					ImGui::EndDisabled();
-
-					displayHash("Unknown", readUint32(&iterator));
-
-					ImGui::LabelText("Objlibpath", "%s", readString(&iterator).c_str());
-					ImGui::LabelText("Bucket type", "%s", readString(&iterator).c_str());
-				}
-				ImGui::End();
-
+			if (ImGui::Begin("Object editor")) {
+				if (parseModeIdx == 3 && spnParsed) spnParsed->draw();
+				else if (parseModeIdx == 4 && sampParsed) sampParsed->draw();
 			}
-
-			if (parseModeIdx == 4) {
-				if (ImGui::Begin("Sample dump")) {
-					char* iterator = parseOffset;
-					iterator += 12; // Skip header
-
-					ImGui::LabelText("Offset", "%p", (void*)(uintptr_t)(parseOffset - objlibOrigin));
-					ImGui::Separator();
-
-					displayHash("Hash", readUint32(&iterator));
-					ImGui::LabelText("Play mode", "%s", readString(&iterator).c_str());
-					displayHash("Unknown", readUint32(&iterator));
-					ImGui::LabelText("Filepath", "%s", readString(&iterator).c_str());
-
-					for (int i = 0; i < 5; ++i) {
-						ImGui::LabelText("Unknown", "%d", readByte(&iterator));
-					}
-
-					ImGui::LabelText("Volume", "%f", std::bit_cast<float>(readUint32(&iterator)));
-					ImGui::LabelText("Pitch", "%f", std::bit_cast<float>(readUint32(&iterator)));
-					ImGui::LabelText("Pan", "%f", std::bit_cast<float>(readUint32(&iterator)));
-					ImGui::LabelText("Offset", "%f", std::bit_cast<float>(readUint32(&iterator)));
-					ImGui::LabelText("Audio channel", "%s", readString(&iterator).c_str());
-
-				}
-				ImGui::End();
-
-			}
+			ImGui::End();
 		}
 
 		if (showImguiDemo) {
