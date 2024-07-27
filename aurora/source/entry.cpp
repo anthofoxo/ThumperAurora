@@ -937,11 +937,11 @@ int main(int, char* []) {
 
 					struct Leaf {
 						uint32_t header[4];
-						uint32_t hash;
+						uint32_t hash0;
 						uint32_t unknown0;
 						float unknown1;
 						std::string timeUnit;
-						uint32_t hash;
+						uint32_t hash1;
 						std::vector<Trait> traits;
 					};
 
