@@ -109,6 +109,7 @@ vec3 readVec3(char** ptr) {
 
 enum struct FileType : uint32_t {
 	kObjlib     = 0x00000008,
+	kFsbTexture = 0x0000000d,
 	kDdsTexture = 0x0000000e
 };
 
@@ -220,10 +221,6 @@ enum struct TraitType : uint32_t {
 	kNumTraitTypes,
 };
 
-std::array<std::string_view, 20> kTraitTypes = {
-	
-};
-
 int failedCount = 0;
 
 std::optional<Objlib> readObjlib(char const* file) {
@@ -239,11 +236,15 @@ std::optional<Objlib> readObjlib(char const* file) {
 	memcpy(&lib.header, ptr, sizeof(ObjlibHeader));
 	ptr += sizeof(ObjlibHeader);
 
-	if (lib.header.fileType != FileType::kObjlib)
+	if (lib.header.fileType != FileType::kObjlib) {
+		++failedCount;
 		return std::nullopt;
+	}
 
 	if (lib.header.objType == ObjType::kObjlibObj) {
 		++failedCount;
+		std::cout << "unsupported type " << file << '\n';
+
 		return std::nullopt;
 	}
 
@@ -312,136 +313,20 @@ std::optional<Objlib> readObjlib(char const* file) {
 }
 
 std::unordered_map<std::string, Objlib> kMap;
-
 std::string kCacheDir;
-
-
 std::string filter;
 
-void loadObjLibs() {
-	for (auto const& entry : std::filesystem::directory_iterator(kCacheDir)) {
-		std::string file = entry.path().filename().string();
+// "Samp header")) { input = "0C 00 00 00 04 00 00 00 01 00 00 00"; parseModeIdx = 4; };
+// "Spn header")) { input = "01 00 00 00 04 00 00 00 02 00 00 00"; parseModeIdx = 3; };
+// "Master header")) { input = "21 00 00 00 21 00 00 00 04 00 00 00 02 00 00 00"; parseModeIdx = 2; };
+// "Leaf header")) { input = "22 00 00 00 21 00 00 00 04 00 00 00 02 00 00 00"; parseModeIdx = 1; }
 
-		if (entry.path().extension() != ".pc") continue;
-
-		std::optional<Objlib> lib = readObjlib(entry.path().string().c_str());
-		if (lib.has_value())
-			kMap[entry.path().stem().string()] = lib.value();
-	}
-}
-
-void dumpHashes() {
-	std::ofstream file;
-	file.open("hash_dump.lua");
-	file << "local table = {}\n";
-
-	for (auto const& [k, v] : kMap) {
-		file << "table[0x" << k << "] = \"A";
-		file << v.originalName;
-		file << "\"\n";
-	}
-
-	file << "return table";
-	file.close();
-}
-
-void loadConfig() {
-	bool hasStoredCachePath = false;
-
-	if (std::filesystem::exists("config.lua")) {
-		lua_State* L = luaL_newstate();
-		luaL_dofile(L, "config.lua");
-		lua_getglobal(L, "cachePath");
-		if (lua_isstring(L, -1))
-			kCacheDir = lua_tostring(L, -1);
-		lua_pop(L, 1);
-		lua_close(L);
-		hasStoredCachePath = true;
-	}
-
-	if(!hasStoredCachePath) {
-		char const* selection = tinyfd_openFileDialog("Select Thumper executable", nullptr, 0, nullptr, nullptr, 0);
-		if (selection == nullptr) return std::exit(0);
-		kCacheDir = (std::filesystem::path(selection).parent_path() / "cache").string();
-		std::replace(kCacheDir.begin(), kCacheDir.end(), '\\', '/');
-
-		std::ofstream file;
-		file.open("config.lua");
-		file << "cachePath = \"" << kCacheDir << "\"";
-		file.close();
-	}
-}
-
-size_t split(const std::string& txt, std::vector<std::string>& strs, char ch)
-{
-	size_t pos = txt.find(ch);
-	size_t initialPos = 0;
-	strs.clear();
-
-	// Decompose statement
-	while (pos != std::string::npos) {
-		strs.push_back(txt.substr(initialPos, pos - initialPos));
-		initialPos = pos + 1;
-
-		pos = txt.find(ch, initialPos);
-	}
-
-	// Add the last one
-	strs.push_back(txt.substr(initialPos, std::min(pos, txt.size()) - initialPos + 1));
-
-	return strs.size();
-}
-
-TextEditor editor;
-lua_State* L = nullptr;
-lua_State* T = nullptr;
-
-void hookfunc(lua_State* L, lua_Debug* ar)
-{
-	lua_getinfo(L, "l", ar); // Get ar->currentline
-	//printf("Executing line: %d\n", ar->currentline);
-
-	TextEditor::ErrorMarkers marker;
-	marker.insert(std::make_pair(ar->currentline, "Current line"));
-	editor.SetErrorMarkers(marker);
-
-	lua_yield(L, 0); // Yield, only works when using `lua_resume` and with 0 return values
-}
-
-static void dumpstack(lua_State* L) {
-	int top = lua_gettop(L);
-	for (int i = 1; i <= top; i++) {
-		printf("%d\t%s\t", i, luaL_typename(L, i));
-		switch (lua_type(L, i)) {
-		case LUA_TNUMBER:
-			printf("%g\n", lua_tonumber(L, i));
-			break;
-		case LUA_TSTRING:
-			printf("%s\n", lua_tostring(L, i));
-			break;
-		case LUA_TBOOLEAN:
-			printf("%s\n", (lua_toboolean(L, i) ? "true" : "false"));
-			break;
-		case LUA_TNIL:
-			printf("%s\n", "nil");
-			break;
-		default:
-			printf("%p\n", lua_topointer(L, i));
-			break;
-		}
-	}
-}
-
-static Objlib* selection = nullptr;
-
-auto displayHash = [](char const* label, uint32_t hash) {
-
+void displayHash(char const* label, uint32_t hash) {
 	char const* match = aurora::lookupHash(hash);
 
 	if (match) ImGui::LabelText(label, "%s", match);
 	else ImGui::LabelText(label, "%08X", hash);
-
-	};
+}
 
 static void writeU8(std::vector<uint8_t>& buffer, uint8_t data) {
 	buffer.push_back(data);
@@ -473,11 +358,7 @@ static void writeVec3(std::vector<uint8_t>& buffer, vec3 const& data) {
 	writeF32(buffer, data.z);
 }
 
-
-
-
 void InjectIntoPc(std::vector<uint8_t>& raw, std::string originFile, size_t originSize, size_t originOffset) {
-
 	std::string backup = originFile + std::string(".bak");
 	if (!std::filesystem::exists(backup))
 		std::filesystem::copy(originFile, backup);
@@ -670,7 +551,7 @@ struct Spn final {
 		return ptr;
 	}
 
-	void serialize(std::vector<uint8_t> &data) {
+	void serialize(std::vector<uint8_t>& data) {
 		writeU32(data, header[0]);
 		writeU32(data, header[1]);
 		writeU32(data, header[2]);
@@ -693,9 +574,126 @@ struct Spn final {
 static std::optional<Spn> spnParsed = std::nullopt;
 static std::optional<Samp> sampParsed = std::nullopt;
 
+void loadObjLibs() {
+	for (auto const& entry : std::filesystem::directory_iterator(kCacheDir)) {
+		std::string file = entry.path().filename().string();
+
+		if (entry.path().extension() != ".pc") continue;
+
+		std::optional<Objlib> lib = readObjlib(entry.path().string().c_str());
+		if (lib.has_value()) {
+			kMap[entry.path().stem().string()] = lib.value();
+
+		
+		}
+	}
+}
+
+void dumpHashes() {
+	std::ofstream file;
+	file.open("hash_dump.lua");
+	file << "local table = {}\n";
+
+	for (auto const& [k, v] : kMap) {
+		file << "table[0x" << k << "] = \"A";
+		file << v.originalName;
+		file << "\"\n";
+	}
+
+	file << "return table";
+	file.close();
+}
+
+void loadConfig() {
+	bool hasStoredCachePath = false;
+
+	if (std::filesystem::exists("config.lua")) {
+		lua_State* L = luaL_newstate();
+		luaL_dofile(L, "config.lua");
+		lua_getglobal(L, "cachePath");
+		if (lua_isstring(L, -1))
+			kCacheDir = lua_tostring(L, -1);
+		lua_pop(L, 1);
+		lua_close(L);
+		hasStoredCachePath = true;
+	}
+
+	if(!hasStoredCachePath) {
+		char const* selection = tinyfd_openFileDialog("Select Thumper executable", nullptr, 0, nullptr, nullptr, 0);
+		if (selection == nullptr) return std::exit(0);
+		kCacheDir = (std::filesystem::path(selection).parent_path() / "cache").string();
+		std::replace(kCacheDir.begin(), kCacheDir.end(), '\\', '/');
+
+		std::ofstream file;
+		file.open("config.lua");
+		file << "cachePath = \"" << kCacheDir << "\"";
+		file.close();
+	}
+}
+
+size_t split(const std::string& txt, std::vector<std::string>& strs, char ch) {
+	size_t pos = txt.find(ch);
+	size_t initialPos = 0;
+	strs.clear();
+
+	// Decompose statement
+	while (pos != std::string::npos) {
+		strs.push_back(txt.substr(initialPos, pos - initialPos));
+		initialPos = pos + 1;
+
+		pos = txt.find(ch, initialPos);
+	}
+
+	// Add the last one
+	strs.push_back(txt.substr(initialPos, std::min(pos, txt.size()) - initialPos + 1));
+
+	return strs.size();
+}
+
+TextEditor editor;
+lua_State* L = nullptr;
+lua_State* T = nullptr;
+
+void hookfunc(lua_State* L, lua_Debug* ar) {
+	lua_getinfo(L, "l", ar); // Get ar->currentline
+	//printf("Executing line: %d\n", ar->currentline);
+
+	TextEditor::ErrorMarkers marker;
+	marker.insert(std::make_pair(ar->currentline, "Current line"));
+	editor.SetErrorMarkers(marker);
+
+	lua_yield(L, 0); // Yield, only works when using `lua_resume` and with 0 return values
+}
+
+static void dumpstack(lua_State* L) {
+	int top = lua_gettop(L);
+	for (int i = 1; i <= top; i++) {
+		printf("%d\t%s\t", i, luaL_typename(L, i));
+		switch (lua_type(L, i)) {
+		case LUA_TNUMBER:
+			printf("%g\n", lua_tonumber(L, i));
+			break;
+		case LUA_TSTRING:
+			printf("%s\n", lua_tostring(L, i));
+			break;
+		case LUA_TBOOLEAN:
+			printf("%s\n", (lua_toboolean(L, i) ? "true" : "false"));
+			break;
+		case LUA_TNIL:
+			printf("%s\n", "nil");
+			break;
+		default:
+			printf("%p\n", lua_topointer(L, i));
+			break;
+		}
+	}
+}
+
+static Objlib* selection = nullptr;
+
+
+
 int main(int, char* []) {
-
-
 	loadConfig();
 
 	loadObjLibs();
@@ -920,6 +918,33 @@ int main(int, char* []) {
 
 			if (parseModeIdx == 1) {
 				if (ImGui::Begin("Parser")) {
+
+					struct DataPoint {
+						float datapoint;
+						std::any value;
+						std::string interpolation;
+						std::string easing;
+					};
+
+					struct Trait {
+						std::string name;
+						uint32_t unknown0;
+						uint32_t param;
+						uint32_t subobjectIdentifier;
+						TraitType traitType;
+						std::vector<DataPoint> datapoints;
+					};
+
+					struct Leaf {
+						uint32_t header[4];
+						uint32_t hash;
+						uint32_t unknown0;
+						float unknown1;
+						std::string timeUnit;
+						uint32_t hash;
+						std::vector<Trait> traits;
+					};
+
 					char* iterator = parseOffset;
 					iterator += 16; // Skip header
 
@@ -1021,6 +1046,8 @@ int main(int, char* []) {
 
 						ImGui::PopID();
 					}
+
+					// We need to figure out how many 0 bytes pad the end of the leaf
 				}
 				ImGui::End();
 
