@@ -95,6 +95,18 @@ std::string readString(char** ptr) {
 	return string;
 }
 
+struct vec3 {
+	float x, y, z;
+};
+
+vec3 readVec3(char** ptr) {
+	vec3 data;
+	memcpy(&data, *ptr, sizeof(vec3));
+	*ptr += sizeof(vec3);
+	return data;
+}
+
+
 enum struct FileType : uint32_t {
 	kObjlib     = 0x00000008,
 	kDdsTexture = 0x0000000e
@@ -417,8 +429,6 @@ static void dumpstack(lua_State* L) {
 
 static Objlib* selection = nullptr;
 
-char leafHeader[16] = { 0x22, 0x00, 0x00, 0x00, 0x21, 0x00, 0x00, 0x00,  0x04,0x00, 0x00, 0x00,  0x02, 0x00, 0x00, 0x00, };
-
 int main(int, char* []) {
 
 
@@ -558,146 +568,305 @@ int main(int, char* []) {
 		}
 
 		static char* objlibOrigin = nullptr;
-		static char* leafOffset = nullptr;
+		static char* parseOffset = nullptr;
 		
+		const char* items[] = { "NOP", "Leaf", "Master", "Spn", "Samp"};
+		static int parseModeIdx = 0;
+
 		{
-			if (ImGui::Begin("Memory Viewer") && selection) {
-				if (ImGui::SmallButton("Parse first leaf (May take a second)")) {
-					auto occurance = std::search(selection->raw.data(), selection->raw.data() + selection->raw.size(), leafHeader, leafHeader + sizeof(leafHeader));
-					
+			
+
+			if (ImGui::Begin("Search for offset by bytes") && selection) {
+				static std::string input;
+				static int offsetbegin = 0;
+
+				if (ImGui::SmallButton("Samp header")) { input = "0C 00 00 00 04 00 00 00 01 00 00 00"; parseModeIdx = 4; };
+				if (ImGui::SmallButton("Spn header")) { input = "01 00 00 00 04 00 00 00 02 00 00 00"; parseModeIdx = 3; };
+				if (ImGui::SmallButton("Master header")) { input = "21 00 00 00 21 00 00 00 04 00 00 00 02 00 00 00"; parseModeIdx = 2; };
+				if (ImGui::SmallButton("Leaf header")) { input = "22 00 00 00 21 00 00 00 04 00 00 00 02 00 00 00"; parseModeIdx = 1; }
+
+				ImGui::InputInt("Offset start", &offsetbegin);
+				ImGui::InputText("Byte search", &input);
+		
+				const char* combo_preview_value = items[parseModeIdx];
+				if (ImGui::BeginCombo("Parse mode", combo_preview_value, 0)) {
+					parseOffset = nullptr;
+
+					for (int n = 0; n < IM_ARRAYSIZE(items); n++) {
+						const bool is_selected = (parseModeIdx == n);
+						if (ImGui::Selectable(items[n], is_selected)) parseModeIdx = n;
+						if (is_selected) ImGui::SetItemDefaultFocus();
+					}
+					ImGui::EndCombo();
+				}
+		
+
+				if (ImGui::Button("Search")) { 
+					std::vector<std::string> tokens;
+					std::vector<uint8_t> byteTokens;
+					split(input, tokens, ' ');
+					byteTokens.reserve(tokens.size());
+
+					for (auto const& token : tokens) {
+						std::istringstream ss(token);
+						unsigned int byte;
+						ss >> std::hex >> byte;
+						byteTokens.push_back(static_cast<uint8_t>(byte));
+					}
+
+
+					auto occurance = std::search(selection->raw.data() + offsetbegin, selection->raw.data() + selection->raw.size(), byteTokens.data(), byteTokens.data() + byteTokens.size());
+
 					if (occurance == selection->raw.data() + selection->raw.size()) {
 						tinyfd_messageBox("Search failed", "Failed to find matching bytes", "ok", "error", 1);
 
 					}
 					else {
+						offsetbegin = occurance - selection->raw.data();
 						memedit.GotoAddrAndHighlight(occurance - selection->raw.data(), occurance - selection->raw.data() + 16);
 						objlibOrigin = selection->raw.data();
-						leafOffset = occurance;
+						parseOffset = occurance;
 					}
-				}
+					
 
+
+				}
+				
+
+				
+			}
+			ImGui::End();
+
+			if (ImGui::Begin("Memory Viewer") && selection) {
+				
 				memedit.DrawContents(selection->raw.data(), selection->raw.size(), (size_t)0);
 			}
 
 			ImGui::End();
 		}
 
-		if (leafOffset) {
+		if (parseOffset && parseModeIdx != 0) {
+
 			auto displayHash = [](char const* label, uint32_t hash) {
 
 				char const* match = aurora::lookupHash(hash);
 
-				if(match) ImGui::LabelText(label, "%s", match);
+				if (match) ImGui::LabelText(label, "%s", match);
 				else ImGui::LabelText(label, "%08X", hash);
 
-			};
+				};
 
-			if (ImGui::Begin("Leaf Dump")) {
-				char* iterator = leafOffset;
-				iterator += 16; // Skip header
+			if (parseModeIdx == 1) {
+				if (ImGui::Begin("Parser")) {
+					char* iterator = parseOffset;
+					iterator += 16; // Skip header
 
-				ImGui::LabelText("Offset", "%p", (void*)(uintptr_t)(leafOffset - objlibOrigin));
-				ImGui::Separator();
+					ImGui::LabelText("Offset", "%p", (void*)(uintptr_t)(parseOffset - objlibOrigin));
+					ImGui::Separator();
 
-				displayHash("Hash", readUint32(&iterator));
-				ImGui::LabelText("Unknown", "%08X", readUint32(&iterator));
-				ImGui::LabelText("Unknown", "%f", std::bit_cast<float>(readUint32(&iterator)));
-				ImGui::LabelText("Timeunit", "%s", readString(&iterator).c_str());
-				displayHash("Hash", readUint32(&iterator));
-				uint32_t numTraits = readUint32(&iterator);
-
-
-				
-
-				ImGui::LabelText("Num traits", "%d", numTraits);
-
-				for (int i = 0; i < numTraits; ++i) {
-
-					ImGui::PushID(i);
-
-					std::string traitName = readString(&iterator);
-
-					ImGui::LabelText("Trait name", "%s", traitName.c_str());
+					displayHash("Hash", readUint32(&iterator));
 					ImGui::LabelText("Unknown", "%08X", readUint32(&iterator));
+					ImGui::LabelText("Unknown", "%f", std::bit_cast<float>(readUint32(&iterator)));
+					ImGui::LabelText("Timeunit", "%s", readString(&iterator).c_str());
+					displayHash("Hash", readUint32(&iterator));
+					uint32_t numTraits = readUint32(&iterator);
 
-					displayHash("Parameter", readUint32(&iterator));
 
-					ImGui::LabelText("Subobject Identifier", "%08X", readUint32(&iterator));
-					TraitType traitType = (TraitType)readUint32(&iterator);
-					ImGui::LabelText("Trait type", "%d", (uint32_t)traitType);
-					uint32_t numDatapoints = readUint32(&iterator);
-					ImGui::LabelText("Num datapoints", "%d", numDatapoints);
+					ImGui::LabelText("Num traits", "%d", numTraits);
 
-					for (uint32_t j = 0; j < numDatapoints; ++j) {
-						uint32_t datapoint = readUint32(&iterator);
+					for (int i = 0; i < numTraits; ++i) {
 
-						std::any value;
-						if (traitType == TraitType::kTraitFloat) value = std::bit_cast<float>(readUint32(&iterator));
-						else if (traitType == TraitType::kTraitAction) value = std::bit_cast<char>(readByte(&iterator));
-						else if (traitType == TraitType::kTraitBool) value = std::bit_cast<char>(readByte(&iterator));
-						else __debugbreak();
+						ImGui::PushID(i);
 
-						std::string interpolation = readString(&iterator);
-						std::string easingMode = readString(&iterator);
+						std::string traitName = readString(&iterator);
 
-						std::string str = std::format("[{}]", j);
-						
-						if (ImGui::TreeNode(str.c_str())) {
-							ImGui::LabelText("Time", "%f", std::bit_cast<float>(datapoint));
+						ImGui::LabelText("Trait name", "%s", traitName.c_str());
+						ImGui::LabelText("Unknown", "%08X", readUint32(&iterator));
 
-							if (traitType == TraitType::kTraitFloat) ImGui::LabelText("Value", "%f", std::any_cast<float>(value));
-							else if (traitType == TraitType::kTraitAction) ImGui::LabelText("Value", "%d", std::any_cast<char>(value));
-							else if (traitType == TraitType::kTraitBool) ImGui::LabelText("Value", "%d", std::any_cast<char>(value));
+						displayHash("Parameter", readUint32(&iterator));
+
+						ImGui::LabelText("Subobject Identifier", "%08X", readUint32(&iterator));
+						TraitType traitType = (TraitType)readUint32(&iterator);
+						ImGui::LabelText("Trait type", "%d", (uint32_t)traitType);
+						uint32_t numDatapoints = readUint32(&iterator);
+						ImGui::LabelText("Num datapoints", "%d", numDatapoints);
+
+						for (uint32_t j = 0; j < numDatapoints; ++j) {
+							uint32_t datapoint = readUint32(&iterator);
+
+							std::any value;
+							if (traitType == TraitType::kTraitFloat) value = std::bit_cast<float>(readUint32(&iterator));
+							else if (traitType == TraitType::kTraitAction) value = std::bit_cast<char>(readByte(&iterator));
+							else if (traitType == TraitType::kTraitBool) value = std::bit_cast<char>(readByte(&iterator));
 							else __debugbreak();
 
-							ImGui::LabelText("Interpolation", "%s", interpolation.c_str());
-							ImGui::LabelText("Easing", "%s", easingMode.c_str());
+							std::string interpolation = readString(&iterator);
+							std::string easingMode = readString(&iterator);
 
-							ImGui::TreePop();
+							std::string str = std::format("[{}]", j);
+
+							if (ImGui::TreeNode(str.c_str())) {
+								ImGui::LabelText("Time", "%f", std::bit_cast<float>(datapoint));
+
+								if (traitType == TraitType::kTraitFloat) ImGui::LabelText("Value", "%f", std::any_cast<float>(value));
+								else if (traitType == TraitType::kTraitAction) ImGui::LabelText("Value", "%d", std::any_cast<char>(value));
+								else if (traitType == TraitType::kTraitBool) ImGui::LabelText("Value", "%d", std::any_cast<char>(value));
+								else __debugbreak();
+
+								ImGui::LabelText("Interpolation", "%s", interpolation.c_str());
+								ImGui::LabelText("Easing", "%s", easingMode.c_str());
+
+								ImGui::TreePop();
+							}
+
 						}
-						
+
+						ImGui::Separator();
+						ImGui::TextUnformatted("Total number of displayed UI elements for data points on Drool's Editor.");
+						uint32_t additional_unknown = readUint32(&iterator);
+						for (int j = 0; j < additional_unknown; ++j) {
+							ImGui::LabelText("Time", "%f", std::bit_cast<float>(readUint32(&iterator)));
+
+							char const* label = (j == additional_unknown - 1) ? "Value (unused)" : "Value";
+							ImGui::LabelText(label, "%f", std::bit_cast<float>(readUint32(&iterator)));
+
+
+
+							ImGui::LabelText("Interpolation", readString(&iterator).c_str());
+							ImGui::LabelText("Easing", readString(&iterator).c_str());
+						}
+						ImGui::Separator();
+
+
+						ImGui::LabelText("Unknown", "%d", readUint32(&iterator));
+						ImGui::LabelText("Unknown", "%d", readUint32(&iterator));
+						ImGui::LabelText("Unknown", "%d", readUint32(&iterator));
+						ImGui::LabelText("Unknown", "%d", readUint32(&iterator));
+						ImGui::LabelText("Unknown", "%d", readUint32(&iterator));
+						ImGui::LabelText("Intensity type (A)", "%s", readString(&iterator).c_str());
+						ImGui::LabelText("Intensity type (B)", "%s", readString(&iterator).c_str());
+						ImGui::LabelText("Unknown", "%d", readByte(&iterator));
+						ImGui::LabelText("Unknown", "%d", readByte(&iterator));
+						ImGui::LabelText("Unknown", "%d", readUint32(&iterator));
+						ImGui::LabelText("Unknown", "%f", std::bit_cast<float>(readUint32(&iterator)));
+						ImGui::LabelText("Unknown", "%f", std::bit_cast<float>(readUint32(&iterator)));
+						ImGui::LabelText("Unknown", "%f", std::bit_cast<float>(readUint32(&iterator)));
+						ImGui::LabelText("Unknown", "%f", std::bit_cast<float>(readUint32(&iterator)));
+						ImGui::LabelText("Unknown", "%f", std::bit_cast<float>(readUint32(&iterator)));
+						ImGui::LabelText("Unknown", "%d", readByte(&iterator));
+						ImGui::LabelText("Unknown", "%d", readByte(&iterator));
+						ImGui::LabelText("Unknown", "%d", readByte(&iterator));
+
+						ImGui::PopID();
 					}
-
-					ImGui::Separator();
-					ImGui::TextUnformatted("Total number of displayed UI elements for data points on Drool's Editor.");
-					uint32_t additional_unknown = readUint32(&iterator);
-					for (int j = 0; j < additional_unknown; ++j) {
-						ImGui::LabelText("Time", "%f", std::bit_cast<float>(readUint32(&iterator)));
-
-						char const* label = (j == additional_unknown - 1) ? "Value (unused)" : "Value";
-						ImGui::LabelText(label, "%f", std::bit_cast<float>(readUint32(&iterator)));
-						
-
-
-						ImGui::LabelText("Interpolation", readString(&iterator).c_str());
-						ImGui::LabelText("Easing", readString(&iterator).c_str());
-					}
-					ImGui::Separator();
-
-
-					ImGui::LabelText("Unknown", "%d", readUint32(&iterator));
-					ImGui::LabelText("Unknown", "%d", readUint32(&iterator));
-					ImGui::LabelText("Unknown", "%d", readUint32(&iterator));
-					ImGui::LabelText("Unknown", "%d", readUint32(&iterator));
-					ImGui::LabelText("Unknown", "%d", readUint32(&iterator));
-					ImGui::LabelText("Intensity type (A)", "%s", readString(&iterator).c_str());
-					ImGui::LabelText("Intensity type (B)", "%s", readString(&iterator).c_str());
-					ImGui::LabelText("Unknown", "%d", readByte(&iterator));
-					ImGui::LabelText("Unknown", "%d", readByte(&iterator));
-					ImGui::LabelText("Unknown", "%d", readUint32(&iterator));
-					ImGui::LabelText("Unknown", "%f", std::bit_cast<float>(readUint32(&iterator)));
-					ImGui::LabelText("Unknown", "%f", std::bit_cast<float>(readUint32(&iterator)));
-					ImGui::LabelText("Unknown", "%f", std::bit_cast<float>(readUint32(&iterator)));
-					ImGui::LabelText("Unknown", "%f", std::bit_cast<float>(readUint32(&iterator)));
-					ImGui::LabelText("Unknown", "%f", std::bit_cast<float>(readUint32(&iterator)));
-					ImGui::LabelText("Unknown", "%d", readByte(&iterator));
-					ImGui::LabelText("Unknown", "%d", readByte(&iterator));
-					ImGui::LabelText("Unknown", "%d", readByte(&iterator));
-
-					ImGui::PopID();
 				}
+				ImGui::End();
+
 			}
-			ImGui::End();
+
+			if (parseModeIdx == 2) {
+				if (ImGui::Begin("Master dump")) {
+					char* iterator = parseOffset;
+					iterator += 16; // Skip header
+
+					ImGui::LabelText("Offset", "%p", (void*)(uintptr_t)(parseOffset - objlibOrigin));
+					ImGui::Separator();
+
+					displayHash("Hash", readUint32(&iterator));
+					ImGui::LabelText("Unknown", "%d", readUint32(&iterator));
+					displayHash("Hash", readUint32(&iterator));
+					ImGui::LabelText("Timeunit", "%s", readString(&iterator).c_str());
+					displayHash("Hash", readUint32(&iterator));
+					ImGui::LabelText("Unknown", "%d", readUint32(&iterator));
+					ImGui::LabelText("Unknown", "%f", std::bit_cast<float>(readUint32(&iterator)));
+					ImGui::LabelText("Skybox name", "%s", readString(&iterator).c_str());
+					ImGui::LabelText("Intro level", "%s", readString(&iterator).c_str());
+
+					uint32_t numSublevels = readUint32(&iterator);
+					ImGui::LabelText("Num sublevels", "%d", numSublevels);
+
+					if(numSublevels >= 1) {
+
+						ImGui::Separator();
+						ImGui::LabelText("Level name", "%s", readString(&iterator).c_str()); // .lvl
+						ImGui::LabelText("Gate name", "%s", readString(&iterator).c_str());
+						ImGui::LabelText("Checkpoint?", "%d", readByte(&iterator));
+						ImGui::LabelText("Checkpoint leader level name", "%s", readString(&iterator).c_str());
+						ImGui::LabelText("Rest level name", "%s", readString(&iterator).c_str());
+					
+						ImGui::TextUnformatted("A variable length buffer is here and is unknown how to calculate its length, cannot parse further");
+
+					}
+
+				}
+				ImGui::End();
+
+			}
+
+			if (parseModeIdx == 3) {
+				if (ImGui::Begin("Spn dump")) {
+					char* iterator = parseOffset;
+					iterator += 12; // Skip header
+
+					ImGui::LabelText("Offset", "%p", (void*)(uintptr_t)(parseOffset - objlibOrigin));
+					ImGui::Separator();
+
+					displayHash("Hash", readUint32(&iterator));
+					displayHash("Hash", readUint32(&iterator));
+					displayHash("Unknown", readUint32(&iterator));
+					ImGui::LabelText("Name", "%s", readString(&iterator).c_str());
+					ImGui::LabelText("Constraint", "%s", readString(&iterator).c_str());
+
+					vec3 pos = readVec3(&iterator);
+					vec3 rotx = readVec3(&iterator);
+					vec3 roty = readVec3(&iterator);
+					vec3 rotz = readVec3(&iterator);
+					vec3 scale = readVec3(&iterator);
+
+					ImGui::BeginDisabled();
+					ImGui::DragFloat3("Position", (float*)&pos);
+					ImGui::DragFloat3("Rotation x", (float*)&rotx);
+					ImGui::DragFloat3("Rotation y", (float*)&roty);
+					ImGui::DragFloat3("Rotation z", (float*)&rotz);
+					ImGui::DragFloat3("Scale", (float*)&scale);
+					ImGui::EndDisabled();
+
+					displayHash("Unknown", readUint32(&iterator));
+
+					ImGui::LabelText("Objlibpath", "%s", readString(&iterator).c_str());
+					ImGui::LabelText("Bucket type", "%s", readString(&iterator).c_str());
+				}
+				ImGui::End();
+
+			}
+
+			if (parseModeIdx == 4) {
+				if (ImGui::Begin("Sample dump")) {
+					char* iterator = parseOffset;
+					iterator += 12; // Skip header
+
+					ImGui::LabelText("Offset", "%p", (void*)(uintptr_t)(parseOffset - objlibOrigin));
+					ImGui::Separator();
+
+					displayHash("Hash", readUint32(&iterator));
+					ImGui::LabelText("Play mode", "%s", readString(&iterator).c_str());
+					displayHash("Unknown", readUint32(&iterator));
+					ImGui::LabelText("Filepath", "%s", readString(&iterator).c_str());
+
+					for (int i = 0; i < 5; ++i) {
+						ImGui::LabelText("Unknown", "%d", readByte(&iterator));
+					}
+
+					ImGui::LabelText("Volume", "%f", std::bit_cast<float>(readUint32(&iterator)));
+					ImGui::LabelText("Pitch", "%f", std::bit_cast<float>(readUint32(&iterator)));
+					ImGui::LabelText("Pan", "%f", std::bit_cast<float>(readUint32(&iterator)));
+					ImGui::LabelText("Offset", "%f", std::bit_cast<float>(readUint32(&iterator)));
+					ImGui::LabelText("Audio channel", "%s", readString(&iterator).c_str());
+
+				}
+				ImGui::End();
+
+			}
 		}
 
 		if (showImguiDemo) {
