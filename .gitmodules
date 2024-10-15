@@ -10,3 +10,12 @@
 [submodule "vendor/lua"]
 	path = vendor/lua
 	url = https://github.com/anthofoxo/lua
+[submodule "vendor/glm"]
+	path = vendor/glm
+	url = https://github.com/g-truc/glm
+[submodule "vendor/assimp"]
+	path = vendor/assimp
+	url = https://github.com/assimp/assimp
+[submodule "vendor/vulpengine"]
+	path = vendor/vulpengine
+	url = https://github.com/anthofoxo/vulpengine

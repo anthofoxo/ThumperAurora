@@ -21,10 +21,16 @@ includedirs {
 	"%{wks.location}/vendor/imgui/backends",
 	"%{wks.location}/vendor/imgui/misc/cpp",
     "%{wks.location}/vendor/tinyfd",
-    "%{wks.location}/vendor/lua/src"
+    "%{wks.location}/vendor/lua/src",
+    "%{wks.location}/vendor/glad/include",
+    "%{wks.location}/vendor/glm",
+    "%{wks.location}/vendor/assimp/include",
+    "%{wks.location}/vendor/assimp_config",
+    "%{wks.location}/vendor/vulpengine/include",
+    "%{wks.location}/vendor/vulpengine/include/vulpengine",
 }
 
-links { "glfw", "imgui", "tinyfd", "lua" }
+links { "glfw", "imgui", "tinyfd", "lua", "glad", "assimp", "vulpengine" }
 
 filter "system:windows"
 files "%{prj.location}/*.rc"

@@ -2,6 +2,7 @@
 #	include <Windows.h> // Suppress: warning C4005: 'APIENTRY': macro redefinition
 #endif
 
+#include <glad/gl.h>
 #include <GLFW/glfw3.h>
 
 #include <tinyfiledialogs.h>
@@ -13,6 +14,8 @@
 #include <lua.hpp>
 
 #include "hashtable.hpp"
+
+#include <vulpengine/vp_transform.hpp>
 
 #include <any>
 #include <algorithm>
@@ -28,7 +31,30 @@
 
 #include <TextEditor.h>
 
+#include <vulpengine/vp_entry.hpp>
+
+#include <cstdint>
+#include <span>
+
+#define GLM_ENABLE_EXPERIMENTAL
+#include <glm/glm.hpp>
+#include <glm/gtx/extended_min_max.hpp>
+#include <glm/gtc/matrix_transform.hpp>
+#include <glm/gtc/type_ptr.hpp>
+
 #include <imgui_memory_editor.h>
+#include "thumper_structs.hpp"
+
+#include <glm/glm.hpp>
+
+#include <assimp/Importer.hpp>
+#include <assimp/Exporter.hpp>
+#include <assimp/scene.h>
+#include <assimp/postprocess.h>
+
+#include "vulpengine/experimental/vp_shader_program.hpp"
+
+#define AURORA_WIKI "http://thumper.anthofoxo.xyz/"
 
 #if defined(WIN32) || defined(_WIN32) || defined(__WIN32__) || defined(__NT__)
 #define SystemOpenURL(url) system("start " url);
@@ -39,7 +65,6 @@
 #else
 #error "Unknown compiler"
 #endif
-
 
 uint32_t hash32(unsigned char const* array, unsigned int size) {
 	uint32_t h = 0x811c9dc5;
@@ -55,21 +80,6 @@ uint32_t hash32(unsigned char const* array, unsigned int size) {
 	h = (h ^ (h >> 0x11)) * 0x21;
 
 	return h;
-}
-
-std::optional<std::vector<char>> readFile(char const* path) {
-	std::ifstream file;
-	file.open(path, std::ios::in | std::ios::binary);
-	if (!file) return std::nullopt;
-
-	std::vector<char> content;
-	file.seekg(0, std::ios::end);
-	auto size = file.tellg();
-	content.resize(size);
-	file.seekg(0, std::ios::beg);
-	file.read(content.data(), content.size());
-	file.close();
-	return content;
 }
 
 uint32_t readUint32(char** ptr) {
@@ -95,22 +105,18 @@ std::string readString(char** ptr) {
 	return string;
 }
 
-struct vec3 {
-	float x, y, z;
-};
-
-vec3 readVec3(char** ptr) {
-	vec3 data;
-	memcpy(&data, *ptr, sizeof(vec3));
-	*ptr += sizeof(vec3);
+glm::vec3 readVec3(char** ptr) {
+	glm::vec3 data;
+	memcpy(&data, *ptr, sizeof(glm::vec3));
+	*ptr += sizeof(glm::vec3);
 	return data;
 }
 
-
 enum struct FileType : uint32_t {
-	kObjlib     = 0x00000008,
-	kFsbTexture = 0x0000000d,
-	kDdsTexture = 0x0000000e
+	kMeshX      =  6,
+	kObjlib     =  8,
+	kFsbTexture = 13,
+	kDdsTexture = 14,
 };
 
 enum struct ObjType : uint32_t {
@@ -197,6 +203,7 @@ struct Objlib {
 	std::vector<Object> objects;
 };
 
+
 enum struct TraitType : uint32_t {
 	kTraitInt = 0,
 	kTraitBool,
@@ -223,18 +230,24 @@ enum struct TraitType : uint32_t {
 
 int failedCount = 0;
 
+#include <vulpengine/vp_util.hpp>
+
 std::optional<Objlib> readObjlib(char const* file) {
 	Objlib lib;
 
 	lib.originFile = file;
 
-	lib.raw = readFile(file).value();
+	lib.raw = vulpengine::read_file(file).value();
 	char* const baseaddr = lib.raw.data();
 	char* ptr = lib.raw.data();
 
 
 	memcpy(&lib.header, ptr, sizeof(ObjlibHeader));
 	ptr += sizeof(ObjlibHeader);
+
+	if (lib.header.fileType == FileType::kMeshX) {
+		return std::nullopt;
+	}
 
 	if (lib.header.fileType != FileType::kObjlib) {
 		++failedCount;
@@ -316,11 +329,6 @@ std::unordered_map<std::string, Objlib> kMap;
 std::string kCacheDir;
 std::string filter;
 
-// "Samp header")) { input = "0C 00 00 00 04 00 00 00 01 00 00 00"; parseModeIdx = 4; };
-// "Spn header")) { input = "01 00 00 00 04 00 00 00 02 00 00 00"; parseModeIdx = 3; };
-// "Master header")) { input = "21 00 00 00 21 00 00 00 04 00 00 00 02 00 00 00"; parseModeIdx = 2; };
-// "Leaf header")) { input = "22 00 00 00 21 00 00 00 04 00 00 00 02 00 00 00"; parseModeIdx = 1; }
-
 void displayHash(char const* label, uint32_t hash) {
 	char const* match = aurora::lookupHash(hash);
 
@@ -352,7 +360,7 @@ static void writeF32(std::vector<uint8_t>& buffer, float data) {
 	memcpy(buffer.data() + buffer.size() - sizeof(float), &data, sizeof(float));
 }
 
-static void writeVec3(std::vector<uint8_t>& buffer, vec3 const& data) {
+static void writeVec3(std::vector<uint8_t>& buffer, glm::vec3 const& data) {
 	writeF32(buffer, data.x);
 	writeF32(buffer, data.y);
 	writeF32(buffer, data.z);
@@ -363,7 +371,7 @@ void InjectIntoPc(std::vector<uint8_t>& raw, std::string originFile, size_t orig
 	if (!std::filesystem::exists(backup))
 		std::filesystem::copy(originFile, backup);
 
-	std::vector<char> original = readFile(originFile.c_str()).value();
+	std::vector<char> original = vulpengine::read_file(originFile.c_str()).value();
 	std::vector<char> final;
 	final.resize(original.size() - originSize + raw.size());
 
@@ -482,11 +490,11 @@ struct Spn final {
 	uint32_t unknown0;
 	std::string name;
 	std::string constraint;
-	vec3 translation;
-	vec3 rotationx;
-	vec3 rotationy;
-	vec3 rotationz;
-	vec3 scale;
+	glm::vec3 translation;
+	glm::vec3 rotationx;
+	glm::vec3 rotationy;
+	glm::vec3 rotationz;
+	glm::vec3 scale;
 	uint32_t unknown1;
 	std::string objlibpath;
 	std::string bucketType;
@@ -691,24 +699,471 @@ static void dumpstack(lua_State* L) {
 
 static Objlib* selection = nullptr;
 
+bool attemptObjPcReplace(std::string obj, std::string pc) {
+	if (!std::string_view(obj).ends_with(".obj")) return false;
+	if (!std::string_view(pc).ends_with(".pc")) return false;
+
+	// Read pc mesh for _unknownField4
+	thumper::MeshFile pcMeshOriginal = thumper::MeshFile::from_file(pc).value();
+
+	std::string const backupPath = pc + ".bak";
+
+	// Import obj
+	Assimp::Importer importer;
+	aiScene const* scene = importer.ReadFile(obj.c_str(), aiProcess_Triangulate | aiProcess_RemoveComponent | aiProcess_GenNormals | aiProcess_ImproveCacheLocality | aiProcess_SortByPType | aiProcess_GenUVCoords | aiProcess_OptimizeMeshes | aiProcess_OptimizeGraph);
+
+	if (!scene || scene->mFlags & AI_SCENE_FLAGS_INCOMPLETE || !scene->mRootNode) return false;
+	if (scene->mNumMeshes != 1) return false;
+
+	aiMesh* mesh = scene->mMeshes[0];
+
+	thumper::MeshFile pcMesh;
+	pcMesh.meshes.resize(1);
+	pcMesh.meshes[0].vertices.reserve(mesh->mNumVertices);
+
+	// Store vertices
+	for (unsigned int i = 0; i < mesh->mNumVertices; ++i) {
+		thumper::Vertex v;
+		v.texcoord = { 0.0f, 0.0f };
+		v.position = { mesh->mVertices[i].x, mesh->mVertices[i].y, mesh->mVertices[i].z };
+		if (mesh->GetNumUVChannels() > 0) v.texcoord = { mesh->mTextureCoords[0][i].x, mesh->mTextureCoords[0][1].y };
+		v.normal = { mesh->mNormals[i].x, mesh->mNormals[i].y, mesh->mNormals[i].z };
+		v.color = { 0, 0, 0, 0 };
+		pcMesh.meshes[0].vertices.push_back(v);
+	}
+
+	// Store triangles
+	pcMesh.meshes[0].triangles.reserve(mesh->mNumFaces);
+
+	for (unsigned int iFace = 0; iFace < mesh->mNumFaces; iFace++) {
+		aiFace face = mesh->mFaces[iFace];
+		if (face.mNumIndices != 3) continue;
+
+		thumper::Triangle t;
+		t.elements[0] = face.mIndices[0];
+		t.elements[1] = face.mIndices[1];
+		t.elements[2] = face.mIndices[2];
+
+		pcMesh.meshes[0].triangles.push_back(t);
+	}
+
+	// Make backup if needed
+	if (!std::filesystem::exists(backupPath))
+		std::filesystem::copy(pc, backupPath);
+
+	pcMesh.to_file(pc);
+
+	return true;
+}
+
+struct MeshWorkspace {
+	void init() {
+		for (auto const& entry : std::filesystem::directory_iterator(kCacheDir)) {
+			if (entry.path().extension() != ".pc") continue;
+
+			auto content = thumper::MeshFile::from_file(entry.path());
+			if (!content) continue;
+
+			mFiles.emplace_back(entry.path().filename().generic_string());
+		}
+
+		mShaderProgramSolid = {{ .file = "solid.glsl" }};
+		mShaderProgramGrid = {{ .file = "grid.glsl" }};
+	}
+
+	void gui() {
+		if (ImGui::Begin("Mesh Workspace - Mesh Info")) {
+			ImGui::Checkbox("Flip Y Axis", &mFlipAxis);
+			ImGui::Checkbox("Flip Winding", &mFlipWinding);
+			if (ImGui::Button("Move Camera")) {
+				mTransform.set(glm::inverse(glm::lookAt(glm::vec3(mLargestVertexDistanceTarget), mGeometryCenterTarget, { 0, 1, 0 })));
+			}
+
+			if (ImGui::Button("Export Mesh")) {
+				auto pcMesh = thumper::MeshFile::from_file(kCacheDir + "/" + mSelected);
+				
+				if (pcMesh) {
+					// Assimp scene setup
+					aiScene scene;
+					scene.mRootNode = new aiNode();
+					scene.mMaterials = new aiMaterial * [1];
+					scene.mMaterials[0] = nullptr;
+					scene.mNumMaterials = 1;
+					scene.mMaterials[0] = new aiMaterial();
+					scene.mMeshes = new aiMesh * [1];
+					scene.mMeshes[0] = nullptr;
+					scene.mNumMeshes = 1;
+					scene.mMeshes[0] = new aiMesh();
+					scene.mMeshes[0]->mMaterialIndex = 0;
+					scene.mRootNode->mMeshes = new unsigned int[1];
+					scene.mRootNode->mMeshes[0] = 0;
+					scene.mRootNode->mNumMeshes = 1;
+					auto pMesh = scene.mMeshes[0];
+
+					// Allocate containers
+					thumper::Mesh& pcMeshOut = pcMesh->meshes[mMeshIndex];
+					pMesh->mVertices = new aiVector3D[pcMeshOut.vertices.size()];
+					pMesh->mNumVertices = pcMeshOut.vertices.size();
+					pMesh->mTextureCoords[0] = new aiVector3D[pcMeshOut.vertices.size()];
+					pMesh->mNumUVComponents[0] = pcMeshOut.vertices.size();
+
+					// Copy vertex data
+					for (auto itr = pcMeshOut.vertices.begin(); itr != pcMeshOut.vertices.end(); ++itr) {
+						const auto& v = itr->position;
+						const auto& t = itr->texcoord;
+						pMesh->mVertices[itr - pcMeshOut.vertices.begin()] = aiVector3D(v[0], v[1], v[2]);
+						pMesh->mTextureCoords[0][itr - pcMeshOut.vertices.begin()] = aiVector3D(t[0], t[2], 0);
+					}
+
+					// Allocate containers
+					pMesh->mFaces = new aiFace[pcMeshOut.triangles.size()];
+					pMesh->mNumFaces = pcMeshOut.triangles.size();
+
+					// Copy triangle data
+					for (int i = 0; i < pcMeshOut.triangles.size(); ++i) {
+						aiFace& face = pMesh->mFaces[i];
+						face.mIndices = new unsigned int[3];
+						face.mNumIndices = 3;
+
+						face.mIndices[0] = pcMeshOut.triangles[i].elements[0];
+						face.mIndices[1] = pcMeshOut.triangles[i].elements[1];
+						face.mIndices[2] = pcMeshOut.triangles[i].elements[2];
+					}
+
+					std::string exportPath = kCacheDir + "/" + mSelected + "." + std::to_string(mMeshIndex) + ".obj";
+
+					Assimp::Exporter exporter;
+					aiReturn result = exporter.Export(&scene, "obj", exportPath.c_str());
+					if (result != aiReturn_SUCCESS) {
+						throw std::runtime_error(exporter.GetErrorString());
+					}
+				}
+			}
+
+			ImGui::BeginDisabled(!mHasBackup);
+
+			if (ImGui::Button("Restore Backup")) {
+				std::filesystem::path current = kCacheDir + "/" + mSelected;
+				std::filesystem::path backup = kCacheDir + "/" + mSelected + ".bak";
+
+				std::filesystem::copy_file(backup, current, std::filesystem::copy_options::overwrite_existing);
+				std::filesystem::remove(backup);
+				mHasBackup = false;
+
+				try {
+					update_preview(mSelected);
+					mValid = true;
+				}
+				catch (std::runtime_error const&) {
+					mValid = false;
+				}
+			}
+
+			ImGui::EndDisabled();
+
+			if (ImGui::Button("Replace Mesh LODs")) {
+				char const* filter = "*.obj";
+				char const* objPath = tinyfd_openFileDialog("Select mesh", nullptr, 1, &filter, nullptr, false);
+	
+				std::string pcPath = kCacheDir + "/" + mSelected;
+
+				if (objPath) {
+					bool success = attemptObjPcReplace(objPath, pcPath);
+
+					if (!success) ImGui::OpenPopup("InvalidMeshInput");
+					else {
+						try {
+							update_preview(mSelected);
+							mValid = true;
+						}
+						catch (std::runtime_error const&) {
+							mValid = false;
+						}
+					}
+				}
+			}
+
+			ImVec2 center = ImGui::GetMainViewport()->GetCenter();
+			ImGui::SetNextWindowPos(center, ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+
+			if (ImGui::BeginPopupModal("InvalidMeshInput", NULL, ImGuiWindowFlags_AlwaysAutoResize))
+			{
+				ImGui::Text("Failed to replace mesh lods");
+				if (ImGui::Button("OK", ImVec2(120, 0))) { ImGui::CloseCurrentPopup(); }
+
+				ImGui::EndPopup();
+			}
+
+			ImGui::LabelText("Meshes in file", "%d", mMeshInfos.size());
+
+			if (ImGui::SliderInt("Mesh Index", &mMeshIndex, 0, mMeshInfos.size() - 1)) {
+				try {
+					update_preview(mSelected);
+					mValid = true;
+				}
+				catch (std::runtime_error const&) {
+					mValid = false;
+				}
+			}
+
+			for (auto const& info : mMeshInfos) {
+				ImGui::Separator();
+				ImGui::LabelText("Vertex Count", "%d", info.vertexCount);
+				ImGui::LabelText("Triangle Count", "%d", info.triangleCount);
+				ImGui::LabelText("Unknown", "%hu", info.unknownValue);
+			}
+		}
+		ImGui::End();
+
+		if (ImGui::Begin("Mesh Workspace - Meshes")) {
+			ImGui::LabelText("Mesh Count", "%d", mFiles.size());
+
+			for (auto const& string : mFiles) {
+				ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_Leaf;
+				if (mSelected == string) flags |= ImGuiTreeNodeFlags_Selected;
+
+				ImGui::TreeNodeEx(string.c_str(), flags);
+
+				if (ImGui::IsItemActivated()) {
+					mSelected = string;
+
+					// Check for a backup file
+					mHasBackup = std::filesystem::exists(kCacheDir + "/" + mSelected + ".bak");
+
+					try {
+						update_preview(mSelected);
+						mValid = true;
+					}
+					catch (std::runtime_error const&) {
+						mValid = false;
+					}
+				}
+
+				ImGui::TreePop();
+			}
+
+		}
+		ImGui::End();
+
+		if (ImGui::Begin("Mesh Workspace - Preview")) {
+			if (mSelected.empty() || !mValid) {
+				ImGui::TextUnformatted("Invalid Mesh");
+			}
+			else {
+				ImVec2 avail = ImGui::GetContentRegionAvail();
+				draw_preview(static_cast<int>(avail.x), static_cast<int>(avail.y));
+				ImGui::Image((void*)(uintptr_t)mFramebufferColor, avail, { 0,1 }, { 1, 0 });
+			}
+		}
+		ImGui::End();
+	}
+
+	void update_preview(std::string source) {
+		if (source.empty()) return;
+
+		if (mVertexArray != 0) {
+			glDeleteVertexArrays(1, &mVertexArray);
+			glDeleteBuffers(1, &mVertexBuffer);
+			glDeleteBuffers(1, &mIndexBuffer);
+		}
+
+		std::string sourceDir = kCacheDir + "/" + source;
+		auto thumpermesh = thumper::MeshFile::from_file(sourceDir);
+		if (!thumpermesh) return;
+
+		// Make sure we don't try to load meshes past the count
+		if (mMeshIndex >= thumpermesh->meshes.size()) mMeshIndex = thumpermesh->meshes.size() - 1;
+
+		// Present this mesh
+		{
+			thumper::Mesh mesh = thumpermesh->meshes[mMeshIndex];
+
+			mElementCount = mesh.triangles.size() * 3;
+			mLargestVertexDistanceTarget = 0;
+			mGeometryCenterTarget = {};
+			for (thumper::Vertex const& v : mesh.vertices) {
+				float maxCoord = glm::max(glm::max(glm::abs(v.position[0]), glm::abs(v.position[1])), glm::abs(v.position[2]));
+				if (maxCoord > mLargestVertexDistanceTarget) mLargestVertexDistanceTarget = maxCoord;
+				mGeometryCenterTarget += v.position;
+			}
+
+			mGeometryCenterTarget /= static_cast<float>(mesh.vertices.size());
+
+			glGenVertexArrays(1, &mVertexArray);
+			glBindVertexArray(mVertexArray);
+
+			glGenBuffers(1, &mVertexBuffer);
+			glBindBuffer(GL_ARRAY_BUFFER, mVertexBuffer);
+			glBufferData(GL_ARRAY_BUFFER, mesh.vertices.size() * sizeof(decltype(mesh.vertices)::value_type), mesh.vertices.data(), GL_STATIC_DRAW);
+
+			glGenBuffers(1, &mIndexBuffer);
+			glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, mIndexBuffer);
+			glBufferData(GL_ELEMENT_ARRAY_BUFFER, mesh.triangles.size() * sizeof(decltype(mesh.triangles)::value_type), mesh.triangles.data(), GL_STATIC_DRAW);
+
+			auto const stride = sizeof(thumper::Vertex);
+
+			glEnableVertexAttribArray(0);
+			glEnableVertexAttribArray(1);
+			glEnableVertexAttribArray(2);
+			glEnableVertexAttribArray(3);
+			glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, stride, (void*)(uintptr_t)offsetof(thumper::Vertex, position));
+			glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, stride, (void*)(uintptr_t)offsetof(thumper::Vertex, normal));
+			glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, stride, (void*)(uintptr_t)offsetof(thumper::Vertex, texcoord));
+			glVertexAttribIPointer(3, 1, GL_UNSIGNED_INT, stride, (void*)(uintptr_t)offsetof(thumper::Vertex, color));
+
+			glBindVertexArray(0);
+		}
+		
+	}
+
+	void draw_preview(int width, int height) {
+		if (mVertexArray == 0) return;
+		if (mElementCount == 0) return;
+
+		if (width != mFramebufferSizeX || height != mFramebufferSizeY) {
+			mFramebufferSizeX = width;
+			mFramebufferSizeY = height;
+
+			if (mFramebufferColor != 0) glDeleteTextures(1, &mFramebufferColor);
+			glGenTextures(1, &mFramebufferColor);
+			glBindTexture(GL_TEXTURE_2D, mFramebufferColor);
+			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+			glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, mFramebufferSizeX, mFramebufferSizeY, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+
+			if (mFramebufferDepth != 0) glDeleteTextures(1, &mFramebufferDepth);
+			glGenTextures(1, &mFramebufferDepth);
+			glBindTexture(GL_TEXTURE_2D, mFramebufferDepth);
+			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+			glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT24, mFramebufferSizeX, mFramebufferSizeY, 0, GL_DEPTH_COMPONENT, GL_FLOAT, nullptr);
+
+			if (mFramebuffer != 0) glDeleteFramebuffers(1, &mFramebuffer);
+			glGenFramebuffers(1, &mFramebuffer);
+			glBindFramebuffer(GL_FRAMEBUFFER, mFramebuffer);
+			glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, mFramebufferColor, 0);
+			glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, mFramebufferDepth, 0);
+		}
+
+		glBindFramebuffer(GL_FRAMEBUFFER, mFramebuffer);
+		glViewport(0, 0, width, height);
+		glClearColor(0.7f, 0.8f, 0.9f, 1.0f);
+		glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+		glDisable(GL_CULL_FACE);
+		glEnable(GL_DEPTH_TEST);
+		mShaderProgramSolid.bind();
+
+		glm::mat4 projection = glm::perspectiveFov(glm::radians(90.0f), (float)width, (float)height, 0.1f, 2048.0f);
+
+		if (ImGui::IsWindowHovered()) {
+			glm::vec3 move{};
+
+			if (ImGui::IsKeyDown(ImGuiKey_W)) --move.z;
+			if (ImGui::IsKeyDown(ImGuiKey_S)) ++move.z;
+			if (ImGui::IsKeyDown(ImGuiKey_A)) --move.x;
+			if (ImGui::IsKeyDown(ImGuiKey_D)) ++move.x;
+
+			mTransform.translate(move * ImGui::GetIO().DeltaTime * 15.0f);
+		}
+
+		if (ImGui::IsWindowHovered() && ImGui::IsMouseDown(ImGuiMouseButton_Right)) {
+			glm::vec3 const up = glm::vec3(glm::vec4(0.0f, 1.0f, 0.0f, 0.0f) * mTransform.get());
+
+			mTransform.orientation = glm::rotate(mTransform.orientation, glm::radians(-ImGui::GetIO().MouseDelta.x * 0.3f), up);
+			mTransform.orientation = glm::rotate(mTransform.orientation, glm::radians(-ImGui::GetIO().MouseDelta.y * 0.3f), { 1.0f, 0.0f, 0.0f });
+		}
+
+		mShaderProgramSolid.push_mat4f("uProjection", projection);
+		mShaderProgramSolid.push_mat4f("uView", glm::inverse(mTransform.get()));
+		mShaderProgramSolid.push_3f("uColor", 1.0f, 0.5f, 0.2f);
+		mShaderProgramSolid.push_1f("uFlip", mFlipAxis);
+
+		glBindVertexArray(mVertexArray);
+
+		bool cwmode = true;
+		cwmode ^= mFlipAxis;
+		cwmode ^= mFlipWinding;
+		if(cwmode) glFrontFace(GL_CW);
+
+		glDrawElements(GL_TRIANGLES, mElementCount, GL_UNSIGNED_SHORT, nullptr);
+		
+		glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
+		mShaderProgramSolid.push_3f("uColor", 1.0f, 1.0f, 1.0f);
+		glDrawElements(GL_TRIANGLES, mElementCount, GL_UNSIGNED_SHORT, nullptr);
+		glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
+		glFrontFace(GL_CCW);
+
+		mShaderProgramGrid.bind();
+		mShaderProgramGrid.push_mat4f("uProjection", projection);
+		mShaderProgramGrid.push_mat4f("uView", glm::inverse(mTransform.get()));
+		glEnable(GL_BLEND);
+		glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+		glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+		glDisable(GL_BLEND);
 
 
-int main(int, char* []) {
+		glDisable(GL_DEPTH_TEST);
+		glBindFramebuffer(GL_FRAMEBUFFER, 0);
+	}
+
+	struct SelectedMeshInfo {
+		uint32_t vertexCount;
+		uint32_t triangleCount;
+		uint16_t unknownValue;
+	};
+
+	bool mHasBackup = false;
+	bool mFlipWinding = false;
+	bool mFlipAxis = false;
+	bool mValid = false;
+	int mMeshIndex = 0;
+	std::vector<SelectedMeshInfo> mMeshInfos;
+	std::string mSelected;
+
+	GLuint mVertexArray = 0;
+	GLuint mVertexBuffer = 0;
+	GLuint mIndexBuffer = 0;
+	GLsizei mElementCount = 0;
+	vulpengine::Transform mTransform;
+	float mLargestVertexDistanceTarget = 0;
+	glm::vec3 mGeometryCenterTarget = {};
+
+	GLuint mFramebuffer = 0;
+	GLuint mFramebufferColor = 0;
+	GLuint mFramebufferDepth = 0;
+	int mFramebufferSizeX = 0;
+	int mFramebufferSizeY = 0;
+
+	std::vector<std::string> mFiles;
+	vulpengine::experimental::ShaderProgram mShaderProgramSolid;
+	vulpengine::experimental::ShaderProgram mShaderProgramGrid;
+};
+
+std::optional<MeshWorkspace> mWorkspaceMesh;
+
+int main(int argc, char* argv[]) {
 	loadConfig();
 
 	loadObjLibs();
 
 	glfwInit();
 
-	glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
-	glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
+	glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
+	glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 6);
+	glfwWindowHint(GLFW_MAXIMIZED, GLFW_TRUE);
 	glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
 	glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GLFW_TRUE);
 
-	GLFWwindow* window = glfwCreateWindow(1280, 720, "Aurora", nullptr, nullptr);
+	GLFWwindow* window = glfwCreateWindow(1280, 720, "Aurora 0.0.3-a.7: Thumper Cache Decompilation and Replacement", nullptr, nullptr);
 
 	glfwMakeContextCurrent(window);
 	glfwSwapInterval(1);
+	gladLoadGL(&glfwGetProcAddress);
 
 	IMGUI_CHECKVERSION();
 	ImGui::CreateContext();
@@ -732,6 +1187,7 @@ int main(int, char* []) {
 	bool viewBpms = false;
 
 	bool showImguiDemo = false;
+	bool workspaceMesh = false;
 
 	MemoryEditor memedit;
 	
@@ -759,8 +1215,8 @@ int main(int, char* []) {
 				if (ImGui::MenuItem("Dump hashes", nullptr, nullptr))
 					dumpHashes();
 
-				if (ImGui::MenuItem("Thumper File and Object Format Specification", nullptr, nullptr)) {
-					SystemOpenURL("https://thumper.tiddlyhost.com/");
+				if (ImGui::MenuItem("Thumper Wiki", nullptr, nullptr)) {
+					SystemOpenURL(AURORA_WIKI);
 				}
 				
 				ImGui::EndMenu();
@@ -768,6 +1224,11 @@ int main(int, char* []) {
 
 			if (ImGui::BeginMenu("View")) {
 				ImGui::MenuItem("ImGuiDemo", nullptr, &showImguiDemo);
+				ImGui::EndMenu();
+			}
+
+			if (ImGui::BeginMenu("Workspaces")) {
+				ImGui::MenuItem("Meshes", nullptr, &workspaceMesh);
 				ImGui::EndMenu();
 			}
 
@@ -836,8 +1297,6 @@ int main(int, char* []) {
 		static int parseModeIdx = 0;
 
 		{
-			
-
 			if (ImGui::Begin("Search for offset by bytes") && selection) {
 				static std::string input;
 				static int offsetbegin = 0;
@@ -913,9 +1372,6 @@ int main(int, char* []) {
 		}
 
 		if (parseOffset && parseModeIdx != 0) {
-
-			
-
 			if (parseModeIdx == 1) {
 				if (ImGui::Begin("Parser")) {
 
@@ -961,7 +1417,7 @@ int main(int, char* []) {
 
 					ImGui::LabelText("Num traits", "%d", numTraits);
 
-					for (int i = 0; i < numTraits; ++i) {
+					for (uint32_t i = 0; i < numTraits; ++i) {
 
 						ImGui::PushID(i);
 
@@ -1011,7 +1467,7 @@ int main(int, char* []) {
 						ImGui::Separator();
 						ImGui::TextUnformatted("Total number of displayed UI elements for data points on Drool's Editor.");
 						uint32_t additional_unknown = readUint32(&iterator);
-						for (int j = 0; j < additional_unknown; ++j) {
+						for (uint32_t j = 0; j < additional_unknown; ++j) {
 							ImGui::LabelText("Time", "%f", std::bit_cast<float>(readUint32(&iterator)));
 
 							char const* label = (j == additional_unknown - 1) ? "Value (unused)" : "Value";
@@ -1130,6 +1586,18 @@ int main(int, char* []) {
 			ImGui::End();
 		}
 
+		if (workspaceMesh) {
+			if (!mWorkspaceMesh) {
+				mWorkspaceMesh = MeshWorkspace();
+				mWorkspaceMesh->init();
+			}
+
+			mWorkspaceMesh->gui();
+		}
+		else if(mWorkspaceMesh) {
+			mWorkspaceMesh = {};
+		}
+
 		if (ImGui::Begin("Obj Libs")) {
 			ImGui::Text("Loaded %d libs", kMap.size());
 			ImGui::Text("Failed to load %d libs", failedCount);
@@ -1227,11 +1695,3 @@ int main(int, char* []) {
 
 	return 0;
 }
-
-#ifdef HE_ENTRY_WINMAIN
-#include <Windows.h> // WINAPI, WinMain, _In_, _In_opt_, HINSTANCE
-#include <stdlib.h> // __argc, __argv
-int WINAPI WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, _In_ LPSTR lpCmdLine, _In_ int nShowCmd) {
-	return main(__argc, __argv);
-}
-#endif

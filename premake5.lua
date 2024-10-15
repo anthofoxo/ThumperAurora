@@ -18,18 +18,23 @@ objdir "%{wks.location}/bin_obj/%{cfg.system}_%{cfg.buildcfg}"
 filter "configurations:debug"
 runtime "Debug"
 optimize "Debug"
+defines "VP_DEBUG"
 symbols "On"
 
 filter "configurations:release"
 runtime "Release"
 optimize "Speed"
 symbols "Off"
+defines "VP_RELEASE"
 flags { "LinkTimeOptimization", "NoBufferSecurityCheck" }
 
 filter "system:windows"
 systemversion "latest"
-defines "NOMINMAX"
+defines { "NOMINMAX", "VP_WINDOWS" }
 buildoptions { "/EHsc", "/Zc:preprocessor", "/Zc:__cplusplus", "/experimental:c11atomics" }
+
+filter "system:linux"
+defines "VP_LINUX"
 
 filter { "system:linux", "language:C++" }
 buildoptions "-std=c++23"
