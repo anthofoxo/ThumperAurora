@@ -699,12 +699,9 @@ static void dumpstack(lua_State* L) {
 
 static Objlib* selection = nullptr;
 
-bool attemptObjPcReplace(std::string obj, std::string pc) {
-	if (!std::string_view(obj).ends_with(".obj")) return false;
-	if (!std::string_view(pc).ends_with(".pc")) return false;
-
-	// Read pc mesh for _unknownField4
-	thumper::MeshFile pcMeshOriginal = thumper::MeshFile::from_file(pc).value();
+// loadedMesh is already in memory, skip reload, we only load the original to preserve _unknownField4
+std::optional<thumper::MeshFile> attempt_obj_pc_replace(thumper::MeshFile& loadedMesh, std::string obj, std::string pc) {
+	if (!std::string_view(pc).ends_with(".pc")) return std::nullopt;
 
 	std::string const backupPath = pc + ".bak";
 
@@ -712,8 +709,8 @@ bool attemptObjPcReplace(std::string obj, std::string pc) {
 	Assimp::Importer importer;
 	aiScene const* scene = importer.ReadFile(obj.c_str(), aiProcess_Triangulate | aiProcess_RemoveComponent | aiProcess_GenNormals | aiProcess_ImproveCacheLocality | aiProcess_SortByPType | aiProcess_GenUVCoords | aiProcess_OptimizeMeshes | aiProcess_OptimizeGraph);
 
-	if (!scene || scene->mFlags & AI_SCENE_FLAGS_INCOMPLETE || !scene->mRootNode) return false;
-	if (scene->mNumMeshes != 1) return false;
+	if (!scene || scene->mFlags & AI_SCENE_FLAGS_INCOMPLETE || !scene->mRootNode) return std::nullopt;
+	if (scene->mNumMeshes != 1) return std::nullopt;
 
 	aiMesh* mesh = scene->mMeshes[0];
 
@@ -747,14 +744,77 @@ bool attemptObjPcReplace(std::string obj, std::string pc) {
 		pcMesh.meshes[0].triangles.push_back(t);
 	}
 
+	// Preserve _unknownField4
+	pcMesh.meshes[0]._unknownField4 = loadedMesh.meshes[0]._unknownField4;
+
 	// Make backup if needed
 	if (!std::filesystem::exists(backupPath))
 		std::filesystem::copy(pc, backupPath);
 
 	pcMesh.to_file(pc);
 
-	return true;
+	return pcMesh;
 }
+
+#include "vulpengine/experimental/vp_mesh.hpp"
+
+struct MeshPreview final {
+	// Uploads the thumper mesh into gpu memory and calculates a few constants from the data
+	void update_mesh(thumper::Mesh const& mesh) {
+		vulpengine::experimental::Buffer vertexBuffer = {{
+			.content = std::as_bytes(std::span(mesh.vertices)),
+			.flags = GL_NONE,
+			.label = "Thumper Preview Vertex Buffer"
+		}};
+
+		vulpengine::experimental::Buffer indexBuffer = {{
+			.content = std::as_bytes(std::span(mesh.triangles)),
+			.flags = GL_NONE,
+			.label = "Thumper Preview Index Buffer"
+		}};
+
+		vulpengine::experimental::VertexArray vertexArray = {{
+			.buffers = std::array{
+				decltype(vertexArray)::BufferInfo{ .buffer = vertexBuffer, .offset = 0, .stride = sizeof(thumper::Vertex), .divisor = 0 },
+			},
+			.attributes = std::array{
+				decltype(vertexArray)::AttributeInfo{.size = 3, .type = GL_FLOAT,        .relativeoffset = offsetof(thumper::Vertex, position), .bindingindex = 0 },
+				decltype(vertexArray)::AttributeInfo{.size = 3, .type = GL_FLOAT,        .relativeoffset = offsetof(thumper::Vertex, normal),   .bindingindex = 0 },
+				decltype(vertexArray)::AttributeInfo{.size = 2, .type = GL_FLOAT,        .relativeoffset = offsetof(thumper::Vertex, texcoord), .bindingindex = 0 },
+				decltype(vertexArray)::AttributeInfo{.size = 4, .type = GL_UNSIGNED_INT, .relativeoffset = offsetof(thumper::Vertex, color),    .bindingindex = 0 },
+			},
+			.indexBuffer = vulpengine::experimental::wrap_cref(indexBuffer),
+			.label = "Thumper Preview Vertex Array"
+		}};
+
+		mMesh = {{
+			.vertexArray = std::move(vertexArray),
+			.buffers = std::array{
+				vulpengine::experimental::wrap_rvref(vertexBuffer),
+				vulpengine::experimental::wrap_rvref(indexBuffer),
+			},
+			.mode = GL_TRIANGLES,
+			.count = static_cast<GLsizei>(mesh.triangles.size() * 3),
+			.type = GL_UNSIGNED_SHORT,
+		}};
+
+		// Calculate geometry center and distances
+		mLargestVertexDistance = 0.0f;
+		mGeometryAverage = {};
+
+		for (thumper::Vertex const& v : mesh.vertices) {
+			float maxCoord = glm::max(glm::max(glm::abs(v.position[0]), glm::abs(v.position[1])), glm::abs(v.position[2]));
+			if (maxCoord > mLargestVertexDistance) mLargestVertexDistance = maxCoord;
+			mGeometryAverage += v.position;
+		}
+
+		mGeometryAverage /= static_cast<float>(mesh.vertices.size());
+	}
+
+	glm::vec3 mGeometryAverage{};
+	float mLargestVertexDistance = 0.0f;
+	vulpengine::experimental::Mesh mMesh;
+};
 
 struct MeshWorkspace {
 	void init() {
@@ -775,69 +835,73 @@ struct MeshWorkspace {
 		if (ImGui::Begin("Mesh Workspace - Mesh Info")) {
 			ImGui::Checkbox("Flip Y Axis", &mFlipAxis);
 			ImGui::Checkbox("Flip Winding", &mFlipWinding);
-			if (ImGui::Button("Move Camera")) {
-				mTransform.set(glm::inverse(glm::lookAt(glm::vec3(mLargestVertexDistanceTarget), mGeometryCenterTarget, { 0, 1, 0 })));
+
+			ImGui::BeginDisabled(!mPreview.has_value());
+
+			if (ImGui::Button("Center Camera")) {
+				mTransform.set(glm::inverse(glm::lookAt(glm::vec3(mPreview->mLargestVertexDistance), mPreview->mGeometryAverage, { 0, 1, 0 })));
 			}
 
+			ImGui::EndDisabled();
+
+			ImGui::SameLine();
+
 			if (ImGui::Button("Export Mesh")) {
-				auto pcMesh = thumper::MeshFile::from_file(kCacheDir + "/" + mSelected);
-				
-				if (pcMesh) {
-					// Assimp scene setup
-					aiScene scene;
-					scene.mRootNode = new aiNode();
-					scene.mMaterials = new aiMaterial * [1];
-					scene.mMaterials[0] = nullptr;
-					scene.mNumMaterials = 1;
-					scene.mMaterials[0] = new aiMaterial();
-					scene.mMeshes = new aiMesh * [1];
-					scene.mMeshes[0] = nullptr;
-					scene.mNumMeshes = 1;
-					scene.mMeshes[0] = new aiMesh();
-					scene.mMeshes[0]->mMaterialIndex = 0;
-					scene.mRootNode->mMeshes = new unsigned int[1];
-					scene.mRootNode->mMeshes[0] = 0;
-					scene.mRootNode->mNumMeshes = 1;
-					auto pMesh = scene.mMeshes[0];
+				// Assimp scene setup
+				aiScene scene;
+				scene.mRootNode = new aiNode();
+				scene.mMaterials = new aiMaterial * [1];
+				scene.mMaterials[0] = nullptr;
+				scene.mNumMaterials = 1;
+				scene.mMaterials[0] = new aiMaterial();
+				scene.mMeshes = new aiMesh * [1];
+				scene.mMeshes[0] = nullptr;
+				scene.mNumMeshes = 1;
+				scene.mMeshes[0] = new aiMesh();
+				scene.mMeshes[0]->mMaterialIndex = 0;
+				scene.mRootNode->mMeshes = new unsigned int[1];
+				scene.mRootNode->mMeshes[0] = 0;
+				scene.mRootNode->mNumMeshes = 1;
+				auto pMesh = scene.mMeshes[0];
 
-					// Allocate containers
-					thumper::Mesh& pcMeshOut = pcMesh->meshes[mMeshIndex];
-					pMesh->mVertices = new aiVector3D[pcMeshOut.vertices.size()];
-					pMesh->mNumVertices = pcMeshOut.vertices.size();
-					pMesh->mTextureCoords[0] = new aiVector3D[pcMeshOut.vertices.size()];
-					pMesh->mNumUVComponents[0] = pcMeshOut.vertices.size();
+				// Allocate containers
+				thumper::Mesh& pcMeshOut = mLoadedMesh.meshes[mMeshIndex];
+				pMesh->mVertices = new aiVector3D[pcMeshOut.vertices.size()];
+				pMesh->mNumVertices = pcMeshOut.vertices.size();
+				pMesh->mTextureCoords[0] = new aiVector3D[pcMeshOut.vertices.size()];
+				pMesh->mNumUVComponents[0] = pcMeshOut.vertices.size();
 
-					// Copy vertex data
-					for (auto itr = pcMeshOut.vertices.begin(); itr != pcMeshOut.vertices.end(); ++itr) {
-						const auto& v = itr->position;
-						const auto& t = itr->texcoord;
-						pMesh->mVertices[itr - pcMeshOut.vertices.begin()] = aiVector3D(v[0], v[1], v[2]);
-						pMesh->mTextureCoords[0][itr - pcMeshOut.vertices.begin()] = aiVector3D(t[0], t[2], 0);
-					}
-
-					// Allocate containers
-					pMesh->mFaces = new aiFace[pcMeshOut.triangles.size()];
-					pMesh->mNumFaces = pcMeshOut.triangles.size();
-
-					// Copy triangle data
-					for (int i = 0; i < pcMeshOut.triangles.size(); ++i) {
-						aiFace& face = pMesh->mFaces[i];
-						face.mIndices = new unsigned int[3];
-						face.mNumIndices = 3;
-
-						face.mIndices[0] = pcMeshOut.triangles[i].elements[0];
-						face.mIndices[1] = pcMeshOut.triangles[i].elements[1];
-						face.mIndices[2] = pcMeshOut.triangles[i].elements[2];
-					}
-
-					std::string exportPath = kCacheDir + "/" + mSelected + "." + std::to_string(mMeshIndex) + ".obj";
-
-					Assimp::Exporter exporter;
-					aiReturn result = exporter.Export(&scene, "obj", exportPath.c_str());
-					if (result != aiReturn_SUCCESS) {
-						throw std::runtime_error(exporter.GetErrorString());
-					}
+				// Copy vertex data
+				for (auto itr = pcMeshOut.vertices.begin(); itr != pcMeshOut.vertices.end(); ++itr) {
+					const auto& v = itr->position;
+					const auto& t = itr->texcoord;
+					pMesh->mVertices[itr - pcMeshOut.vertices.begin()] = aiVector3D(v[0], v[1], v[2]);
+					pMesh->mTextureCoords[0][itr - pcMeshOut.vertices.begin()] = aiVector3D(t[0], t[1], 0);
 				}
+
+				// Allocate containers
+				pMesh->mFaces = new aiFace[pcMeshOut.triangles.size()];
+				pMesh->mNumFaces = pcMeshOut.triangles.size();
+
+				// Copy triangle data
+				for (int i = 0; i < pcMeshOut.triangles.size(); ++i) {
+					aiFace& face = pMesh->mFaces[i];
+					face.mIndices = new unsigned int[3];
+					face.mNumIndices = 3;
+
+					face.mIndices[0] = pcMeshOut.triangles[i].elements[0];
+					face.mIndices[1] = pcMeshOut.triangles[i].elements[1];
+					face.mIndices[2] = pcMeshOut.triangles[i].elements[2];
+				}
+
+				std::string exportPath = kCacheDir + "/" + mSelected + "." + std::to_string(mMeshIndex) + ".obj";
+
+				Assimp::Exporter exporter;
+				aiReturn result = exporter.Export(&scene, "obj", exportPath.c_str());
+				if (result != aiReturn_SUCCESS) {
+					throw std::runtime_error(exporter.GetErrorString());
+				}
+				
 			}
 
 			ImGui::BeginDisabled(!mHasBackup);
@@ -852,10 +916,9 @@ struct MeshWorkspace {
 
 				try {
 					update_preview(mSelected);
-					mValid = true;
 				}
 				catch (std::runtime_error const&) {
-					mValid = false;
+					mPreview = {};
 				}
 			}
 
@@ -868,17 +931,14 @@ struct MeshWorkspace {
 				std::string pcPath = kCacheDir + "/" + mSelected;
 
 				if (objPath) {
-					bool success = attemptObjPcReplace(objPath, pcPath);
+					auto optNewMesh = attempt_obj_pc_replace(mLoadedMesh, objPath, pcPath);
 
-					if (!success) ImGui::OpenPopup("InvalidMeshInput");
+					if (!optNewMesh) ImGui::OpenPopup("InvalidMeshInput");
 					else {
-						try {
-							update_preview(mSelected);
-							mValid = true;
-						}
-						catch (std::runtime_error const&) {
-							mValid = false;
-						}
+						mLoadedMesh = optNewMesh.value();
+						mMeshIndex = 0;
+						mPreview = MeshPreview();
+						mPreview->update_mesh(mLoadedMesh.meshes[mMeshIndex]);
 					}
 				}
 			}
@@ -894,23 +954,18 @@ struct MeshWorkspace {
 				ImGui::EndPopup();
 			}
 
-			ImGui::LabelText("Meshes in file", "%d", mMeshInfos.size());
+			ImGui::LabelText("Meshes in file", "%d", mLoadedMesh.meshes.size());
 
-			if (ImGui::SliderInt("Mesh Index", &mMeshIndex, 0, mMeshInfos.size() - 1)) {
-				try {
-					update_preview(mSelected);
-					mValid = true;
-				}
-				catch (std::runtime_error const&) {
-					mValid = false;
-				}
+			if (ImGui::SliderInt("Mesh Index", &mMeshIndex, 0, mLoadedMesh.meshes.size() - 1)) {
+				mPreview = MeshPreview();
+				mPreview->update_mesh(mLoadedMesh.meshes[mMeshIndex]);
 			}
 
-			for (auto const& info : mMeshInfos) {
+			for (auto const& info : mLoadedMesh.meshes) {
 				ImGui::Separator();
-				ImGui::LabelText("Vertex Count", "%d", info.vertexCount);
-				ImGui::LabelText("Triangle Count", "%d", info.triangleCount);
-				ImGui::LabelText("Unknown", "%hu", info.unknownValue);
+				ImGui::LabelText("Vertex Count", "%d", info.vertices.size());
+				ImGui::LabelText("Triangle Count", "%d", info.triangles.size());
+				ImGui::LabelText("_unknownField4", "%hu", info._unknownField4);
 			}
 		}
 		ImGui::End();
@@ -932,10 +987,9 @@ struct MeshWorkspace {
 
 					try {
 						update_preview(mSelected);
-						mValid = true;
 					}
 					catch (std::runtime_error const&) {
-						mValid = false;
+						mPreview = {};
 					}
 				}
 
@@ -946,7 +1000,7 @@ struct MeshWorkspace {
 		ImGui::End();
 
 		if (ImGui::Begin("Mesh Workspace - Preview")) {
-			if (mSelected.empty() || !mValid) {
+			if (mSelected.empty() || !mPreview) {
 				ImGui::TextUnformatted("Invalid Mesh");
 			}
 			else {
@@ -958,67 +1012,31 @@ struct MeshWorkspace {
 		ImGui::End();
 	}
 
-	void update_preview(std::string source) {
-		if (source.empty()) return;
-
-		if (mVertexArray != 0) {
-			glDeleteVertexArrays(1, &mVertexArray);
-			glDeleteBuffers(1, &mVertexBuffer);
-			glDeleteBuffers(1, &mIndexBuffer);
+	void update_preview(std::string const& source) {
+		if (source.empty()) {
+			mPreview = {};
+			return;
 		}
 
 		std::string sourceDir = kCacheDir + "/" + source;
 		auto thumpermesh = thumper::MeshFile::from_file(sourceDir);
-		if (!thumpermesh) return;
+		if (!thumpermesh) { 
+			mLoadedMesh = {};
+			mPreview = {};
+			return;
+		}
+
+		mLoadedMesh = thumpermesh.value();
 
 		// Make sure we don't try to load meshes past the count
 		if (mMeshIndex >= thumpermesh->meshes.size()) mMeshIndex = thumpermesh->meshes.size() - 1;
 
-		// Present this mesh
-		{
-			thumper::Mesh mesh = thumpermesh->meshes[mMeshIndex];
-
-			mElementCount = mesh.triangles.size() * 3;
-			mLargestVertexDistanceTarget = 0;
-			mGeometryCenterTarget = {};
-			for (thumper::Vertex const& v : mesh.vertices) {
-				float maxCoord = glm::max(glm::max(glm::abs(v.position[0]), glm::abs(v.position[1])), glm::abs(v.position[2]));
-				if (maxCoord > mLargestVertexDistanceTarget) mLargestVertexDistanceTarget = maxCoord;
-				mGeometryCenterTarget += v.position;
-			}
-
-			mGeometryCenterTarget /= static_cast<float>(mesh.vertices.size());
-
-			glGenVertexArrays(1, &mVertexArray);
-			glBindVertexArray(mVertexArray);
-
-			glGenBuffers(1, &mVertexBuffer);
-			glBindBuffer(GL_ARRAY_BUFFER, mVertexBuffer);
-			glBufferData(GL_ARRAY_BUFFER, mesh.vertices.size() * sizeof(decltype(mesh.vertices)::value_type), mesh.vertices.data(), GL_STATIC_DRAW);
-
-			glGenBuffers(1, &mIndexBuffer);
-			glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, mIndexBuffer);
-			glBufferData(GL_ELEMENT_ARRAY_BUFFER, mesh.triangles.size() * sizeof(decltype(mesh.triangles)::value_type), mesh.triangles.data(), GL_STATIC_DRAW);
-
-			auto const stride = sizeof(thumper::Vertex);
-
-			glEnableVertexAttribArray(0);
-			glEnableVertexAttribArray(1);
-			glEnableVertexAttribArray(2);
-			glEnableVertexAttribArray(3);
-			glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, stride, (void*)(uintptr_t)offsetof(thumper::Vertex, position));
-			glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, stride, (void*)(uintptr_t)offsetof(thumper::Vertex, normal));
-			glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, stride, (void*)(uintptr_t)offsetof(thumper::Vertex, texcoord));
-			glVertexAttribIPointer(3, 1, GL_UNSIGNED_INT, stride, (void*)(uintptr_t)offsetof(thumper::Vertex, color));
-
-			glBindVertexArray(0);
-		}
-		
+		mPreview = MeshPreview();
+		mPreview->update_mesh(mLoadedMesh.meshes[mMeshIndex]);
 	}
 
 	void draw_preview(int width, int height) {
-		if (mVertexArray == 0) return;
-		if (mElementCount == 0) return;
+		if (!mPreview) return;
 
 		if (width != mFramebufferSizeX || height != mFramebufferSizeY) {
 			mFramebufferSizeX = width;
@@ -1083,18 +1101,16 @@ struct MeshWorkspace {
 		mShaderProgramSolid.push_3f("uColor", 1.0f, 0.5f, 0.2f);
 		mShaderProgramSolid.push_1f("uFlip", mFlipAxis);
 
-		glBindVertexArray(mVertexArray);
-
 		bool cwmode = true;
 		cwmode ^= mFlipAxis;
 		cwmode ^= mFlipWinding;
 		if(cwmode) glFrontFace(GL_CW);
 
-		glDrawElements(GL_TRIANGLES, mElementCount, GL_UNSIGNED_SHORT, nullptr);
+		mPreview->mMesh.draw();
 		
 		glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
 		mShaderProgramSolid.push_3f("uColor", 1.0f, 1.0f, 1.0f);
-		glDrawElements(GL_TRIANGLES, mElementCount, GL_UNSIGNED_SHORT, nullptr);
+		mPreview->mMesh.draw();
 		glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
 		glFrontFace(GL_CCW);
 
@@ -1111,27 +1127,15 @@ struct MeshWorkspace {
 		glBindFramebuffer(GL_FRAMEBUFFER, 0);
 	}
 
-	struct SelectedMeshInfo {
-		uint32_t vertexCount;
-		uint32_t triangleCount;
-		uint16_t unknownValue;
-	};
-
 	bool mHasBackup = false;
 	bool mFlipWinding = false;
 	bool mFlipAxis = false;
-	bool mValid = false;
 	int mMeshIndex = 0;
-	std::vector<SelectedMeshInfo> mMeshInfos;
+	thumper::MeshFile mLoadedMesh;
 	std::string mSelected;
 
-	GLuint mVertexArray = 0;
-	GLuint mVertexBuffer = 0;
-	GLuint mIndexBuffer = 0;
-	GLsizei mElementCount = 0;
+	std::optional<MeshPreview> mPreview;
 	vulpengine::Transform mTransform;
-	float mLargestVertexDistanceTarget = 0;
-	glm::vec3 mGeometryCenterTarget = {};
 
 	GLuint mFramebuffer = 0;
 	GLuint mFramebufferColor = 0;
@@ -1159,7 +1163,7 @@ int main(int argc, char* argv[]) {
 	glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
 	glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GLFW_TRUE);
 
-	GLFWwindow* window = glfwCreateWindow(1280, 720, "Aurora 0.0.3-a.7: Thumper Cache Decompilation and Replacement", nullptr, nullptr);
+	GLFWwindow* window = glfwCreateWindow(1280, 720, "Aurora 0.0.3 Thumper Cache Decompilation", nullptr, nullptr);
 
 	glfwMakeContextCurrent(window);
 	glfwSwapInterval(1);

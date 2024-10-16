@@ -9,7 +9,7 @@ defines
 {
     -- The following formats are enabled
     --"ASSIMP_BUILD_NO_OBJ_IMPORTER",
-    --"ASSIMP_BUILD_NO_COLLADA_IMPORTER",
+    "ASSIMP_BUILD_NO_COLLADA_IMPORTER",
     --"ASSIMP_BUILD_NO_BLEND_IMPORTER",
     -- The following does not work
     "ASSIMP_BUILD_NO_C4D_IMPORTER",

@@ -21,3 +21,4 @@ With these project files. The application should build without any issue.
 * glm 1.0.1
 * assimp 5.0.1
 * glad ogl 3.3
+* Vulpengine v0.0.1
